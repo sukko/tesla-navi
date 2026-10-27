@@ -11,6 +11,8 @@ class CameraController(
     private val engine: CameraNavigationEngine,
     private val speaker: CameraSpeaker,
     private val settings: StateFlow<GuidanceOptions> = MutableStateFlow(GuidanceOptions()),
+    private val walkingSteps: Flow<Long> = emptyFlow(),
+    private val onContinuation: (String) -> Unit = {},
     private val clock: () -> Long,
 ) {
     private val _state = MutableStateFlow(CameraState())
@@ -56,11 +58,24 @@ class CameraController(
         if (nativeKey.isBlank()) { configured(false); return }
         try {
             coroutineScope {
-                _state.update { it.copy(phase = CameraPhase.WAITING_VEHICLE, message = "차량 연결을 기다리고 있습니다", error = null) }
+                _state.update { it.copy(phase = CameraPhase.WAITING_VEHICLE, message = "차량 연결을 기다리고 있습니다", error = null,
+                    phoneFallback = false, continuationExpired = false, vehicleAvailable = false, continuationEndReason = null) }
                 launch(start = CoroutineStart.UNDISPATCHED) {
                     settings.collect { speaker.setVolume(it.volumePercent) }
                 }
                 val movement = TripMotionGate()
+                val continuation = GuidanceContinuation()
+                val tick = MutableStateFlow(clock())
+                launch {
+                    state.map { it.phoneFallback }.distinctUntilChanged().collectLatest { active ->
+                        if (active) while (currentCoroutineContext().isActive) {
+                            try { walkingSteps.collect { continuation.step(it, clock()) } }
+                            catch (error: CancellationException) { throw error }
+                            catch (_: Exception) { /* Optional sensor failure must never end driving guidance. */ }
+                            delay(10_000) // Permission may be granted while a disconnected trip is running.
+                        }
+                    }
+                }
                 var initialized = false
                 var voiceInitialized = false
                 suspend fun initializeVoice() {
@@ -95,6 +110,12 @@ class CameraController(
                                     currentSpeedKph = null, roadClass = RoadClass.UNKNOWN, overSpeed = false, overSpeedCamera = null) }
                             }
                             is NavigationEvent.Frame -> {
+                                continuation.observe(event, clock())
+                                if (continuation.expired) {
+                                    speaker.setOverSpeedAlert(false); speaker.silence()
+                                    tick.value = clock()
+                                    return@collect
+                                }
                                 val fresh = event.locationAtMillis?.let { clock() - it in 0..10000 } == true
                                 val cameras = if (fresh) event.cameras.filter { it.distanceMeters in 0..10000 }
                                     .distinctBy { it.id }.sortedBy { it.distanceMeters } else emptyList()
@@ -139,6 +160,7 @@ class CameraController(
                 launch {
                     while (isActive) {
                         delay(1000)
+                        tick.value = clock()
                         if (pendingTrip && acceptingFrames && !_state.value.muted && _state.value.voiceError == null) {
                             val token = Any()
                             tripSpeech = token
@@ -162,18 +184,42 @@ class CameraController(
                         }
                     }
                 }
-                drive.map { current ->
+                combine(drive, tick) { current, now ->
+                    if (tripVin != current.vin) movement.update(null, false, null)
                     if (tripVin != current.vin || current.snapshot?.gear == dev.teslanavi.protocol.Gear.PARK) {
                         tripVin = current.vin; tripAnnounced = false; pendingTrip = false
                     }
                     val available = current.phase == DrivePhase.CONNECTED && current.snapshot != null
-                    val moving = movement.update(current.vin, available, current.snapshot)
-                    GuidanceTarget(current.vin, available, moving, if (available) current.snapshot?.destination else null)
+                    // Preserve the motion latch through a lost BLE link, including a reconnect at a traffic light.
+                    val moving = if (available || current.phase == DrivePhase.IDLE)
+                        movement.update(current.vin, available, current.snapshot) else false
+                    val fallback = continuation.update(current, moving, now)
+                    if (continuation.expired) {
+                        movement.update(null, false, null)
+                        pendingTrip = false; tripAnnounced = false
+                    }
+                    val wasFallback = _state.value.phoneFallback
+                    val previousEnd = _state.value.continuationEndReason
+                    _state.update { it.copy(phoneFallback = continuation.usingPhone, continuationExpired = continuation.expired,
+                        continuationEndReason = continuation.endReason,
+                        vehicleAvailable = available,
+                        phase = if (continuation.expired) CameraPhase.IDLE else it.phase,
+                        mode = if (continuation.expired) null else it.mode,
+                        message = if (continuation.expired) continuation.endMessage else it.message) }
+                    when {
+                        continuation.endReason != null && continuation.endReason != previousEnd -> onContinuation(continuation.endMessage)
+                        continuation.usingPhone && !wasFallback -> onContinuation("차량 응답 중단 · 마지막 목적지와 휴대폰 GPS로 안내 유지 · 하차 여부 미확정")
+                        wasFallback && available -> onContinuation("차량 재연결 확인 · 최신 차량 정보로 복귀")
+                    }
+                    GuidanceTarget(current.vin, available || fallback != null, moving || fallback != null,
+                        if (available) current.snapshot?.destination else fallback)
                 }.distinctUntilChanged().collectLatest { (_, available, moving, destination) ->
                     invalidate()
                     engine.pause()
                     if (!available || destination == null) {
-                        _state.update { it.copy(phase = CameraPhase.WAITING_VEHICLE, mode = null, message = "차량 재연결을 기다리고 있습니다") }
+                        _state.update { it.copy(phase = if (it.continuationExpired) CameraPhase.IDLE else CameraPhase.WAITING_VEHICLE,
+                            mode = null, message = if (it.continuationExpired) continuation.endMessage
+                            else "차량 재연결을 기다리고 있습니다") }
                     } else if (!moving) {
                         _state.update { it.copy(phase = CameraPhase.WAITING_DRIVE, mode = null,
                             message = "주행 시작 대기 · 차량 속도 3 km/h 이상에서 안내합니다") }
@@ -204,7 +250,7 @@ class CameraController(
                                 delay(waitSeconds * 1000L)
                             }
                         }
-                        // Owned by this drive target: parking/disconnection cancels an in-flight retry.
+                        // Owned by this guidance target: parking, a different vehicle or fallback expiry cancels it.
                         while (currentCoroutineContext().isActive) {
                             delay(5000)
                             if (!voiceInitialized || speaker.needsInitialization) initializeVoice()
@@ -224,7 +270,8 @@ class CameraController(
             _state.update { it.copy(phase = CameraPhase.ERROR, error = "이 기기에서 카카오 SDK를 불러오지 못했습니다.", message = "기기 호환성을 확인해 주세요") }
         } finally {
             invalidate(); engine.pause(); speaker.close()
-            if (_state.value.phase != CameraPhase.ERROR) configured(true)
+            _state.update { it.copy(phoneFallback = false, vehicleAvailable = false) }
+            if (_state.value.phase != CameraPhase.ERROR && !_state.value.continuationExpired) configured(true)
         }
     }
 

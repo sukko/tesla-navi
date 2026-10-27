@@ -10,6 +10,7 @@ import android.content.pm.PackageManager
 import android.location.LocationManager
 import android.os.Build
 import android.os.SystemClock
+import android.util.Log
 import androidx.core.content.ContextCompat
 import androidx.core.location.LocationManagerCompat
 import dev.teslanavi.protocol.BleFraming
@@ -41,17 +42,21 @@ class AndroidBleTransport private constructor(private val context: Context) : Ve
     @Volatile private var closed = false
     private var tx: BluetoothGattCharacteristic? = null
     private var mtu = 23
+    @Volatile private var rxMode: GattRxMode? = null
+    @Volatile private var rxSupportsBoth = false
     private val receivedChunks = AtomicLong()
     private val receivedMessages = AtomicLong()
     private val lastReceivedAt = AtomicLong()
     override fun diagnostics(): String {
         val last = lastReceivedAt.get()
         val age = if (receivedChunks.get() == 0L) "없음" else "${SystemClock.elapsedRealtime() - last}ms"
-        return "MTU=$mtu, 수신조각=${receivedChunks.get()}, 완성메시지=${receivedMessages.get()}, 마지막수신=$age"
+        return "MTU=$mtu, RX=${rxMode?.name ?: "미설정"}, 수신조각=${receivedChunks.get()}, 완성메시지=${receivedMessages.get()}, 마지막수신=$age"
     }
 
     private val callback = object : BluetoothGattCallback() {
         override fun onConnectionStateChange(g: BluetoothGatt, status: Int, newState: Int) {
+            Log.i("TeslaNaviBle", "connection state=$newState status=$status closed=$closed")
+            if (closed) return
             if (status == BluetoothGatt.GATT_SUCCESS && newState == BluetoothProfile.STATE_CONNECTED) {
                 connected.complete(Unit)
             } else if (status != BluetoothGatt.GATT_SUCCESS || newState == BluetoothProfile.STATE_DISCONNECTED) {
@@ -67,9 +72,11 @@ class AndroidBleTransport private constructor(private val context: Context) : Ve
             negotiatedMtu.complete(if (status == BluetoothGatt.GATT_SUCCESS) value else 23)
         }
         override fun onDescriptorWrite(g: BluetoothGatt, descriptor: BluetoothGattDescriptor, status: Int) {
-            if (descriptor.uuid != CCCD) return
+            if (closed || descriptor.uuid != CCCD || descriptor.characteristic.uuid != RX) return
+            Log.i("TeslaNaviBle", "RX descriptor callback status=$status mode=${rxMode?.name}")
             if (status == BluetoothGatt.GATT_SUCCESS) configured.complete(Unit)
-            else configured.completeExceptionally(IOException("차량 알림 구독 실패 ($status)"))
+            else configured.completeExceptionally(GattRxSubscriptionException("차량 알림 구독 실패 ($status)",
+                rxSupportsBoth && rxMode == GattRxMode.INDICATION && status !in setOf(5, 8, 15)))
         }
         override fun onCharacteristicWrite(g: BluetoothGatt, characteristic: BluetoothGattCharacteristic, status: Int) {
             if (characteristic.uuid != TX) return
@@ -108,7 +115,7 @@ class AndroidBleTransport private constructor(private val context: Context) : Ve
         incoming.close(error)
     }
 
-    private suspend fun open(device: BluetoothDevice, onStatus: (String) -> Unit) {
+    private suspend fun open(device: BluetoothDevice, onStatus: (String) -> Unit, preferNotification: Boolean) {
         gatt = device.connectGatt(context, false, callback, BluetoothDevice.TRANSPORT_LE)
             ?: throw IOException("Bluetooth 연결을 시작하지 못했습니다.")
         connectionStep(15000, "차량은 발견했지만 Bluetooth 연결을 완료하지 못했습니다. 차량 가까이에서 다시 시도해 주세요.") { connected.await() }
@@ -120,17 +127,25 @@ class AndroidBleTransport private constructor(private val context: Context) : Ve
         tx = service.getCharacteristic(TX) ?: error("차량 전송 채널이 없습니다.")
         val rx = service.getCharacteristic(RX) ?: error("차량 수신 채널이 없습니다.")
         onStatus("차량 메시지 채널 설정 중")
-        if (connection.requestMtu(512)) mtu = connectionStep(8000, "Bluetooth 전송 크기 협상 시간이 초과되었습니다.") { negotiatedMtu.await() }.coerceAtLeast(23)
-        onStatus("Bluetooth 전송 크기 확인 · MTU $mtu")
+        // Subscribe before MTU negotiation, as in Tesla's BLE connector. Do not let the MTU operation
+        // precede the critical RX setup during recovery from a dropped link.
         check(connection.setCharacteristicNotification(rx, true)) { "차량 알림을 활성화하지 못했습니다." }
         val descriptor = rx.getDescriptor(CCCD) ?: error("차량 알림 설정을 찾지 못했습니다.")
-        val value = if (rx.properties and BluetoothGattCharacteristic.PROPERTY_INDICATE != 0)
-            BluetoothGattDescriptor.ENABLE_INDICATION_VALUE else BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
-        onStatus("차량 응답 알림 구독 중 · RX 속성 ${rx.properties}")
-        val accepted = if (Build.VERSION.SDK_INT >= 33) connection.writeDescriptor(descriptor, value) == BluetoothStatusCodes.SUCCESS
-            else { descriptor.value = value; connection.writeDescriptor(descriptor) }
-        check(accepted) { "차량 알림 구독을 시작하지 못했습니다." }
-        connectionStep(8000, "차량 응답 알림 설정 시간이 초과되었습니다.") { configured.await() }
+        rxSupportsBoth = GattRxMode.supportsBoth(rx.properties)
+        val mode = GattRxMode.select(rx.properties, preferNotification).also { rxMode = it }
+        val fallbackAllowed = rxSupportsBoth && mode == GattRxMode.INDICATION
+        onStatus("차량 응답 수신 설정 중 · ${mode.label}")
+        var writeCode = BluetoothStatusCodes.SUCCESS
+        val accepted = if (Build.VERSION.SDK_INT >= 33) {
+            writeCode = retryBusyGattWrite { connection.writeDescriptor(descriptor, mode.value) }
+            writeCode == BluetoothStatusCodes.SUCCESS
+        } else { descriptor.value = mode.value; connection.writeDescriptor(descriptor) }
+        Log.i("TeslaNaviBle", "RX descriptor requested mode=${mode.name} properties=${rx.properties} accepted=$accepted code=$writeCode")
+        if (!accepted) throw GattRxSubscriptionException("차량 알림 구독을 시작하지 못했습니다. (Android write $writeCode)", fallbackAllowed)
+        awaitRxSubscription(configured, mode, rxSupportsBoth)
+        onStatus("차량 응답 수신 설정 완료 · ${mode.label}")
+        if (connection.requestMtu(512)) mtu = connectionStep(8000, "Bluetooth 전송 크기 협상 시간이 초과되었습니다.") { negotiatedMtu.await() }.coerceAtLeast(23)
+        onStatus("Bluetooth 전송 크기 확인 · MTU $mtu")
     }
 
     override suspend fun send(message: ByteArray) = writeMutex.withLock {
@@ -185,9 +200,14 @@ class AndroidBleTransport private constructor(private val context: Context) : Ve
             }
             onStatus("차량 검색 중")
             val device = scan(adapter, VehicleIdentity.localName(vin), onStatus)
-            onStatus("차량 연결 중")
-            val transport = AndroidBleTransport(context.applicationContext)
-            try { transport.open(device, onStatus); return transport } catch (error: Throwable) { transport.close(); throw error }
+            return connectWithRxFallback(onRetry = {
+                onStatus("차량 응답 수신 설정 실패 · 일반 알림 방식으로 다시 연결합니다")
+            }) { preferNotification ->
+                onStatus("차량 연결 중")
+                val transport = AndroidBleTransport(context.applicationContext)
+                try { transport.open(device, onStatus, preferNotification); transport }
+                catch (error: Throwable) { transport.close(); throw error }
+            }
         }
 
         private suspend fun scan(adapter: BluetoothAdapter, name: String, onStatus: (String) -> Unit): BluetoothDevice {

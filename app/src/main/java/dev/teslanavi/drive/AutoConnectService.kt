@@ -56,11 +56,12 @@ class AutoConnectService : Service() {
         running = true
         app.drive.recordAutomaticStart("대기 서비스 시작 완료")
         app.bluetoothStart.refresh()
-        if (app.drive.state.value.active) DriveService.notificationOwnerChanged(this)
+        if (app.drive.state.value.active || DriveService.busy) DriveService.notificationOwnerChanged(this)
         if (monitor?.isActive != true) monitor = scope.launch {
             launch {
                 combine(app.autoConnect.status, app.drive.state, app.cameras.state) { message, drive, cameras ->
-                    if (!drive.active) message else when (cameras.phase) {
+                    if (cameras.phoneFallback) "차량 연결 끊김 · 마지막 목적지로 카메라 안내 중"
+                    else if (!drive.active) message else when (cameras.phase) {
                         dev.teslanavi.navigation.CameraPhase.WAITING_DRIVE -> "차량 연결됨 · 주행 시작 대기"
                         dev.teslanavi.navigation.CameraPhase.GUIDING -> "주행 중 · 카메라 안내"
                         else -> drive.status
@@ -166,9 +167,9 @@ class AutoConnectService : Service() {
             app.autoConnect.setEnabled(false)
             ProximityScan.disarm(context)
             running = false
-            if (app.drive.state.value.active && !app.drive.state.value.automatic) DriveService.notificationOwnerChanged(context)
+            if ((app.drive.state.value.active || DriveService.busy) && !app.drive.state.value.automatic) DriveService.notificationOwnerChanged(context)
             context.stopService(Intent(context, AutoConnectService::class.java))
-            if (app.drive.state.value.automatic && app.drive.state.value.active) DriveService.stop(context)
+            if (app.drive.state.value.automatic && (app.drive.state.value.active || DriveService.busy)) DriveService.stop(context)
         }
     }
 }

@@ -336,22 +336,22 @@ private fun VehicleScreen(profiles: List<VehicleProfile>, selected: String?, sta
                     MainHeader(state, onOpenSettings = { showFeatures = true })
                     battery?.let { BatteryCard(it, batteryLive) }
                     GuidanceButton(onSettings)
-                    if (connected) CameraCard(cameras, hasKakaoKey, onMute, options)
+                    if (connected) CameraCard(cameras, hasKakaoKey, onMute, options, onDisconnect)
                     VehicleList(profiles, selected, state, onAdd, onSelect)
                     AutoConnectCard(profiles, autoEnabled, autoStatus, onAutomatic, bluetoothStart, onBluetooth)
                     ConnectionCard(profiles, selected, state, localError, autoEnabled, onConnect, onDisconnect)
                     DestinationCard(selected, state, onRefresh)
-                    if (!connected) CameraCard(cameras, hasKakaoKey, onMute, options)
+                    if (!connected) CameraCard(cameras, hasKakaoKey, onMute, options, onDisconnect)
                     Diagnostics(selected, state)
                     VersionFooter()
                 }
                 tab == AppTab.MAIN -> ScreenColumn {
                     MainHeader(state, onOpenSettings = null)
                     battery?.let { BatteryCard(it, batteryLive) }
-                    if (connected) CameraCard(cameras, hasKakaoKey, onMute, options)
+                    if (connected) CameraCard(cameras, hasKakaoKey, onMute, options, onDisconnect)
                     else StatusCard(profiles, selected, state, localError) { chosen = AppTab.SETTINGS }
                     DestinationCard(selected, state, onRefresh)
-                    if (!connected) CameraCard(cameras, hasKakaoKey, onMute, options)
+                    if (!connected) CameraCard(cameras, hasKakaoKey, onMute, options, onDisconnect)
                 }
                 guidanceOpen -> guidancePage { guidanceOpen = false }
                 else -> ScreenColumn {
@@ -650,7 +650,7 @@ private fun ColumnScope.VersionFooter() {
 }
 
 @Composable
-private fun CameraCard(state: CameraState, hasKey: Boolean, onMute: (Boolean) -> Unit, options: GuidanceOptions) {
+private fun CameraCard(state: CameraState, hasKey: Boolean, onMute: (Boolean) -> Unit, options: GuidanceOptions, onStop: () -> Unit) {
     AppCard {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
             Text("단속카메라 안내", fontWeight = FontWeight.SemiBold)
@@ -682,6 +682,10 @@ private fun CameraCard(state: CameraState, hasKey: Boolean, onMute: (Boolean) ->
             CameraPhase.WAITING_GPS -> "현재 위치를 확인하고 있어요"
             else -> state.message
         }, fontSize = 17.sp, color = Muted)
+        if (state.phoneFallback) {
+            Text("차량 연결 끊김 · 마지막 목적지와 휴대폰 GPS로 안내 중", color = Mint, fontSize = 12.sp)
+            OutlinedButton(onClick = onStop, modifier = Modifier.fillMaxWidth()) { Text("안내 종료") }
+        }
         state.mode?.let {
             Text(if (it == NavigationMode.ROUTE) "카카오 경로 기준 · 테슬라 경로와 다를 수 있습니다" else "현재 주행 도로 기준 · 안전운행 모드", color = Muted, fontSize = 11.sp)
         }
@@ -1171,6 +1175,7 @@ private fun GuidanceSettingsContent(app: TeslaNaviApp, guidanceActive: Boolean,
     }
     section { GuidanceSoundCheck(volume.roundToInt(), guidanceActive, app::guidanceSpeaker,
         selectionKey = "${options.voice}/${options.supertonicSpeaker}") }
+    section { DepartureDetectionControl(app.walkingSteps) }
     section {
         Text("고속도로 ${highway.roundToInt()} m 전", fontWeight = FontWeight.SemiBold)
         Slider(value = highway, onValueChange = { highway = it }, onValueChangeFinished = { settings.highway(highway.roundToInt()) },

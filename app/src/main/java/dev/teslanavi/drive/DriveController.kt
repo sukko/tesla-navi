@@ -67,6 +67,11 @@ class DriveController(private val context: Context, private val keyStore: Vehicl
         val events = history.append("자동 시작 · $message")
         _state.update { it.copy(events = events) }
     }
+    fun recordGuidance(message: String) {
+        android.util.Log.i("TeslaNaviConnection", "카메라 안내 · $message")
+        val events = history.append("카메라 안내 · $message")
+        _state.update { it.copy(events = events) }
+    }
     private fun status(message: String, phase: DrivePhase? = null) {
         android.util.Log.i("TeslaNaviConnection", message)
         val events = write(attempts.line("[${phase ?: _state.value.phase}] $message"))

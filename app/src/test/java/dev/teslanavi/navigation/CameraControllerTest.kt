@@ -2,6 +2,7 @@ package dev.teslanavi.navigation
 
 import dev.teslanavi.drive.DrivePhase
 import dev.teslanavi.drive.DriveState
+import dev.teslanavi.drive.runWithGuidanceRecovery
 import dev.teslanavi.protocol.DriveSnapshot
 import dev.teslanavi.protocol.GeoPoint
 import dev.teslanavi.protocol.Gear
@@ -471,7 +472,7 @@ class CameraControllerTest {
         job.cancelAndJoin()
     }
 
-    @Test fun disconnectAndVehicleChangeClearCameraAndAudioState() = runTest {
+    @Test fun disconnectKeepsTheRouteButVehicleChangeClearsCameraAndAudioState() = runTest {
         val engine = FakeNavigationEngine()
         val speaker = FakeSpeaker()
         val controller = CameraController(engine, speaker) { testScheduler.currentTime }
@@ -482,14 +483,181 @@ class CameraControllerTest {
         drive.value = DriveState(vin = "vehicle-a", phase = DrivePhase.RECONNECTING)
         runCurrent()
         engine.frame(listOf(camera), 0); runCurrent()
-        assertTrue(controller.state.value.cameras.isEmpty())
-        assertEquals(CameraPhase.WAITING_VEHICLE, controller.state.value.phase)
+        assertTrue(controller.state.value.cameras.isNotEmpty())
+        assertEquals(CameraPhase.GUIDING, controller.state.value.phase)
+        assertTrue(controller.state.value.phoneFallback)
+        assertEquals(1, engine.destinations.size)
+        assertEquals(1, speaker.spoken.size)
         drive.value = connected(vin = "vehicle-b"); runCurrent()
+        assertFalse(controller.state.value.phoneFallback)
+        assertTrue(controller.state.value.cameras.isEmpty())
         engine.frame(listOf(camera), 0); runCurrent()
         assertEquals(2, speaker.spoken.size)
         job.cancelAndJoin()
         assertTrue(speaker.closed)
         assertTrue(controller.state.value.cameras.isEmpty())
+    }
+
+    @Test fun disconnectedGuidanceUsesPhoneSpeedAndReconnectAtTrafficLightKeepsSameRoute() = runTest {
+        val engine = FakeNavigationEngine()
+        val speaker = FakeSpeaker()
+        val controller = CameraController(engine, speaker) { testScheduler.currentTime }
+        val drive = MutableStateFlow(connected(speed = 10.0).copy(updatedAt = System.currentTimeMillis()))
+        val job = backgroundScope.launch { controller.run("key", drive) }
+        runCurrent()
+        val revision = engine.revision
+        drive.value = DriveState(vin = "vehicle-a", phase = DrivePhase.RECONNECTING)
+        runCurrent()
+        engine.frame(listOf(camera), 0, speed = 70); runCurrent()
+        assertTrue(controller.state.value.phoneFallback)
+        assertEquals(70.0, controller.state.value.currentSpeedKph!!, 0.01)
+        assertTrue(speaker.alarm)
+        assertEquals(revision, engine.revision)
+        assertEquals(1, engine.destinations.size)
+        drive.value = connected(speed = 0.0).copy(updatedAt = System.currentTimeMillis()); runCurrent()
+        assertFalse(controller.state.value.phoneFallback)
+        assertEquals(revision, engine.revision)
+        engine.frame(emptyList(), 0, speed = 50); runCurrent()
+        assertEquals(0.0, controller.state.value.currentSpeedKph!!, 0.01)
+        drive.value = connected(speed = 0.0, gear = Gear.PARK); runCurrent()
+        assertEquals(CameraPhase.WAITING_DRIVE, controller.state.value.phase)
+        job.cancelAndJoin()
+    }
+
+    @Test fun tenMinutesWithoutMotionStopsDisconnectedGuidanceAndDropsNewFrames() = runTest {
+        val engine = FakeNavigationEngine()
+        val speaker = FakeSpeaker()
+        val controller = CameraController(engine, speaker) { testScheduler.currentTime }
+        val drive = MutableStateFlow(connected())
+        val job = backgroundScope.launch { controller.run("key", drive) }
+        runCurrent()
+        drive.value = DriveState(vin = "vehicle-a", phase = DrivePhase.ERROR); runCurrent()
+        engine.frame(listOf(camera), 0, speed = 0); runCurrent()
+        advanceTimeBy(599_999); runCurrent()
+        assertTrue(controller.state.value.phoneFallback)
+        advanceTimeBy(1); runCurrent()
+        assertTrue(controller.state.value.continuationExpired)
+        assertFalse(controller.state.value.phoneFallback)
+        assertEquals(CameraPhase.IDLE, controller.state.value.phase)
+        assertTrue(controller.state.value.cameras.isEmpty())
+        assertFalse(speaker.alarm)
+        val speeches = speaker.spoken.size
+        engine.frame(listOf(camera.copy(id = "after-stop")), testScheduler.currentTime, speed = 70); runCurrent()
+        assertTrue(controller.state.value.cameras.isEmpty())
+        assertEquals(speeches, speaker.spoken.size)
+        job.cancelAndJoin()
+        assertTrue(controller.state.value.continuationExpired)
+        assertTrue(speaker.closed)
+    }
+
+    @Test fun continuingPhoneMotionAllowsMoreThanTenMinutesAndNewDestinationTakesOverOnReconnect() = runTest {
+        val engine = FakeNavigationEngine()
+        val controller = CameraController(engine, FakeSpeaker()) { testScheduler.currentTime }
+        val drive = MutableStateFlow(connected())
+        val job = backgroundScope.launch { controller.run("key", drive) }
+        runCurrent()
+        drive.value = DriveState(vin = "vehicle-a", phase = DrivePhase.RECONNECTING); runCurrent()
+        repeat(20) {
+            advanceTimeBy(60_000); runCurrent()
+            engine.frame(emptyList(), testScheduler.currentTime, speed = 50); runCurrent()
+        }
+        assertTrue(controller.state.value.phoneFallback)
+        assertFalse(controller.state.value.continuationExpired)
+        assertEquals(listOf(destination), engine.destinations)
+        val newGoal = NavigationDestination.Active("부산역", GeoPoint(35.115, 129.042))
+        drive.value = connected(newGoal); runCurrent()
+        assertFalse(controller.state.value.phoneFallback)
+        assertEquals(listOf(destination, newGoal), engine.destinations)
+        job.cancelAndJoin()
+    }
+
+    @Test fun explicitStopParkingAndMissingDestinationNeverKeepDisconnectedGuidanceAlive() = runTest {
+        for (initial in listOf(connected(NavigationDestination.None), connected(speed = 0.0, gear = Gear.PARK))) {
+            val controller = CameraController(FakeNavigationEngine(), FakeSpeaker()) { testScheduler.currentTime }
+            val drive = MutableStateFlow(initial)
+            val job = backgroundScope.launch { controller.run("key", drive) }
+            runCurrent()
+            drive.value = DriveState(vin = "vehicle-a", phase = DrivePhase.RECONNECTING); runCurrent()
+            assertFalse(controller.state.value.phoneFallback)
+            assertEquals(CameraPhase.WAITING_VEHICLE, controller.state.value.phase)
+            job.cancelAndJoin()
+        }
+        val controller = CameraController(FakeNavigationEngine(), FakeSpeaker()) { testScheduler.currentTime }
+        val drive = MutableStateFlow(connected())
+        val job = backgroundScope.launch { controller.run("key", drive) }
+        runCurrent()
+        drive.value = DriveState(); runCurrent()
+        assertFalse(controller.state.value.phoneFallback)
+        assertEquals(CameraPhase.WAITING_VEHICLE, controller.state.value.phase)
+        job.cancelAndJoin()
+    }
+
+    @Test fun serviceRecoveryAndCameraControllerTogetherKeepGuidanceUntilTheGpsIdleDeadline() = runTest {
+        val engine = FakeNavigationEngine()
+        val speaker = FakeSpeaker()
+        val controller = CameraController(engine, speaker) { testScheduler.currentTime }
+        val drive = MutableStateFlow(connected())
+        val cameraJob = backgroundScope.launch { controller.run("key", drive) }
+        runCurrent()
+        val dropout = CompletableDeferred<Unit>()
+        var attempts = 0
+        var closed = false
+        val service = launch {
+            try {
+                runWithGuidanceRecovery(controller.state, runVehicle = {
+                    if (++attempts == 1) dropout.await()
+                    else try { awaitCancellation() } finally { closed = true }
+                }, onFailure = { drive.value = DriveState(vin = "vehicle-a", phase = DrivePhase.ERROR) },
+                    onRetry = { drive.value = DriveState(vin = "vehicle-a", phase = DrivePhase.CONNECTING) })
+            } finally { cameraJob.cancelAndJoin() }
+        }
+        runCurrent()
+        dropout.completeExceptionally(java.io.IOException("BLE exhausted")); runCurrent()
+        assertTrue(controller.state.value.phoneFallback)
+        engine.frame(listOf(camera), 0, speed = 0); runCurrent()
+        assertTrue(controller.state.value.cameras.isNotEmpty())
+        advanceTimeBy(599_999); runCurrent()
+        assertTrue(service.isActive)
+        assertFalse(speaker.closed)
+        advanceTimeBy(1); runCurrent()
+        assertTrue(service.isCompleted)
+        assertTrue(closed)
+        assertTrue(speaker.closed)
+        assertTrue(controller.state.value.continuationExpired)
+        assertEquals(CameraPhase.IDLE, controller.state.value.phase)
+        assertTrue(controller.state.value.cameras.isEmpty())
+    }
+
+    @Test fun sustainedWalkingAfterLinkLossEndsGuidanceAndReleasesTheStepObserver() = runTest {
+        val engine = FakeNavigationEngine()
+        val speaker = FakeSpeaker()
+        val steps = MutableSharedFlow<Long>(extraBufferCapacity = 8)
+        val notices = mutableListOf<String>()
+        val controller = CameraController(engine, speaker, walkingSteps = steps, onContinuation = { notices += it }) {
+            testScheduler.currentTime
+        }
+        val drive = MutableStateFlow(connected())
+        val job = backgroundScope.launch { controller.run("key", drive) }
+        runCurrent()
+        assertEquals(0, steps.subscriptionCount.value)
+        drive.value = DriveState(vin = "vehicle-a", phase = DrivePhase.ERROR); runCurrent()
+        assertEquals(1, steps.subscriptionCount.value)
+        engine.frame(emptyList(), 0, speed = 4, position = NavigationPosition(0.0, 0.0)); runCurrent()
+        repeat(120) { index ->
+            advanceTimeBy(1000); runCurrent()
+            steps.tryEmit(testScheduler.currentTime)
+            engine.frame(emptyList(), testScheduler.currentTime, speed = 4, position = NavigationPosition(index + 1.0, 0.0))
+            runCurrent()
+        }
+        advanceTimeBy(1000); runCurrent()
+        assertTrue(controller.state.value.continuationExpired)
+        assertEquals(ContinuationEndReason.WALKING, controller.state.value.continuationEndReason)
+        assertEquals(CameraPhase.IDLE, controller.state.value.phase)
+        assertEquals(0, steps.subscriptionCount.value)
+        assertTrue(notices.any { it.contains("하차로 추정") })
+        assertFalse(speaker.alarm)
+        job.cancelAndJoin()
+        assertEquals(ContinuationEndReason.WALKING, controller.state.value.continuationEndReason)
     }
 
     @Test fun mutingStopsCurrentAudioAndSuppressesNewAnnouncements() = runTest {
@@ -596,8 +764,8 @@ private class FakeNavigationEngine : CameraNavigationEngine {
     }
     override fun pause() { revision++ }
     fun frame(cameras: List<CameraReading>, locationAt: Long, atRevision: Long = revision,
-        road: RoadClass = RoadClass.UNKNOWN, speed: Int? = 50) {
-        events.tryEmit(NavigationUpdate(atRevision, NavigationEvent.Frame(cameras, speed, locationAt, road)))
+        road: RoadClass = RoadClass.UNKNOWN, speed: Int? = 50, position: NavigationPosition? = null) {
+        events.tryEmit(NavigationUpdate(atRevision, NavigationEvent.Frame(cameras, speed, locationAt, road, position)))
     }
 }
 

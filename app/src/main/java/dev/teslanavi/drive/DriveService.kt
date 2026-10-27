@@ -35,7 +35,8 @@ class DriveService : Service() {
         if (intent?.action == OWNERSHIP) {
             if (session?.isActive == true) {
                 if (AutoConnectService.running) stopForeground(STOP_FOREGROUND_REMOVE)
-                else ServiceCompat.startForeground(this, 1, notification(app.drive.state.value.status),
+                else ServiceCompat.startForeground(this, 1, notification(if (app.cameras.state.value.phoneFallback)
+                    "차량 연결 끊김 · 마지막 목적지로 카메라 안내 중" else app.drive.state.value.status),
                     if (Build.VERSION.SDK_INT >= 29) ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE or
                         (if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED)
                             ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION else 0) else 0)
@@ -86,7 +87,8 @@ class DriveService : Service() {
             }
             val updates = launch {
                 combine(app.drive.state, app.cameras.state) { drive, cameras ->
-                    when (cameras.phase) {
+                    if (cameras.phoneFallback) "차량 연결 끊김 · 마지막 목적지로 카메라 안내 중"
+                    else when (cameras.phase) {
                         dev.teslanavi.navigation.CameraPhase.WAITING_DRIVE -> "차량 연결됨 · 주행 시작 대기"
                         dev.teslanavi.navigation.CameraPhase.GUIDING -> "주행 중 · 카메라 안내"
                         else -> drive.status
@@ -96,7 +98,12 @@ class DriveService : Service() {
                 }
             }
             // Keep observing P so departure after a long stop can restart guidance.
-            try { app.drive.run(profile, enroll) }
+            try { runWithGuidanceRecovery(app.cameras.state,
+                runVehicle = { app.drive.run(profile, enroll) }, onFailure = app.drive::fail,
+                onRetry = {
+                    app.drive.prepare(profile.vin, automatic)
+                    app.drive.recordAutomaticStart("휴대폰 안내 유지 중 · 차량 재연결 시도")
+                }) }
             catch (error: TimeoutCancellationException) { app.drive.fail(error) }
             catch (error: CancellationException) { app.drive.clear(); throw error }
             catch (error: Exception) { app.drive.fail(error) }

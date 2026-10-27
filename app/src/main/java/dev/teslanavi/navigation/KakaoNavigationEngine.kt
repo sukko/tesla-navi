@@ -252,7 +252,8 @@ class KakaoNavigationEngine(private val app: Application, private val settings: 
                 distance, camera.isVariableSpeedLimit)
         } else emptyList()
         publish(NavigationEvent.Frame(cameras, gps?.takeIf { it.speedTrust }?.speed,
-            if (fresh && current != null && !routeInvalid) locationAtMillis else null, roadClass(current?.roadType)))
+            if (fresh && current != null && !routeInvalid) locationAtMillis else null, roadClass(current?.roadType),
+            if (fresh) gps?.let { NavigationPosition(it.pos.x.toDouble(), it.pos.y.toDouble()) } else null))
     }
 
     private fun usable(gps: KNGPSData): Boolean = gps.valid && gps.posTrust &&

@@ -20,10 +20,12 @@ data class CameraReading(
 
 enum class NavigationMode { SAFETY, ROUTE }
 enum class RoadClass(val cameraAlertMeters: Int) { HIGHWAY(500), GENERAL(300), UNKNOWN(500) }
+/** Trusted original GPS position in the SDK's projected metre coordinates, before road snapping. */
+data class NavigationPosition(val xMeters: Double, val yMeters: Double)
 sealed interface NavigationEvent {
     data class Mode(val mode: NavigationMode, val message: String) : NavigationEvent
     data class Frame(val cameras: List<CameraReading>, val speedKph: Int?, val locationAtMillis: Long?,
-        val roadClass: RoadClass = RoadClass.UNKNOWN) : NavigationEvent
+        val roadClass: RoadClass = RoadClass.UNKNOWN, val position: NavigationPosition? = null) : NavigationEvent
     data class RouteInvalidated(val message: String) : NavigationEvent
 }
 
@@ -54,6 +56,7 @@ interface CameraSpeaker {
 }
 
 enum class CameraPhase { KEY_REQUIRED, IDLE, WAITING_VEHICLE, WAITING_DRIVE, INITIALIZING, WAITING_GPS, GUIDING, ERROR }
+enum class ContinuationEndReason { NO_MOVEMENT, WALKING }
 data class CameraState(
     val phase: CameraPhase = CameraPhase.KEY_REQUIRED,
     val message: String = "이 설치 파일에는 카카오 안내 키가 없습니다. 앱 업데이트가 필요합니다.",
@@ -67,6 +70,11 @@ data class CameraState(
     val roadClass: RoadClass = RoadClass.UNKNOWN,
     val overSpeed: Boolean = false,
     val overSpeedCamera: CameraReading? = null,
+    val phoneFallback: Boolean = false,
+    val continuationExpired: Boolean = false,
+    val continuationEndReason: ContinuationEndReason? = null,
+    /** Acknowledges the drive observer, so service teardown cannot race its fallback decision. */
+    val vehicleAvailable: Boolean = false,
 )
 
 /** How far before the alert distance a slow voice may start preparing the announcement. */
