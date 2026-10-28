@@ -7,6 +7,14 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class GuidanceContinuationTest {
+    @Test fun vehicleFramesCannotExtendDisconnectedPhoneGuidanceTimer() {
+        val session = GuidanceContinuation()
+        session.update(connected, true, 0)
+        session.update(lost, false, 0)
+        session.observe(frame(599_000, 50, 500.0).copy(source = PositionSource.VEHICLE), 599_000)
+        assertNull(session.update(lost, false, 600_000))
+        assertTrue(session.expired)
+    }
     private val goal = NavigationDestination.Active("목적지", GeoPoint(37.5, 127.0))
     private val connected = DriveState(vin = "a", phase = DrivePhase.CONNECTED,
         snapshot = DriveSnapshot(goal, 30.0, null, null, Gear.DRIVE))

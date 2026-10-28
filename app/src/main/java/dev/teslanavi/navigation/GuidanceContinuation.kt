@@ -50,6 +50,7 @@ internal class GuidanceContinuation {
 
     /** Only fresh, trusted GPS observations count. A fixed location or small GPS drift cannot extend the timer. */
     fun observe(frame: NavigationEvent.Frame, now: Long) {
+        if (frame.source != PositionSource.PHONE) return
         val fixAt = frame.locationAtMillis ?: return
         if (now - fixAt !in 0..10_000 || lastFixAt?.let { fixAt <= it } == true) return
         lastFixAt = fixAt

@@ -25,16 +25,22 @@ data class GeoPoint(val latitude: Double, val longitude: Double) {
 }
 
 /** The vehicle's own GPS from LocationState. A missing or 0,0 coordinate means no usable fix. */
-data class VehicleLocation(val point: GeoPoint?, val headingDegrees: Int?, val gpsAsOf: Long?) {
+data class VehicleLocation(val point: GeoPoint?, val headingDegrees: Int?, val gpsAsOf: Long?,
+    val estimatedValid: Boolean? = null, val timestampMillis: Long? = null) {
     companion object {
         fun from(state: LocationState): VehicleLocation = VehicleLocation(
-            if (state.hasLatitude() && state.hasLongitude())
-                runCatching { GeoPoint(state.latitude.toDouble(), state.longitude.toDouble()) }.getOrNull()
-                    ?.takeUnless { it.latitude == 0.0 && it.longitude == 0.0 }
-            else null,
-            if (state.hasHeading()) state.heading else null,
+            (if (state.nativeType.hasWGS() && state.hasNativeLatitude() && state.hasNativeLongitude())
+                point(state.nativeLatitude, state.nativeLongitude) else null)
+                ?: if (state.hasLatitude() && state.hasLongitude()) point(state.latitude, state.longitude) else null,
+            if (state.hasHeading()) state.heading.takeIf { it in 0..359 } else null,
             if (state.hasGpsAsOf()) state.gpsAsOf else null,
+            if (state.hasEstimatedGpsValid()) state.estimatedGpsValid else null,
+            if (state.hasTimestamp()) state.timestamp.seconds.takeIf { it in 1..Long.MAX_VALUE / 1000 }
+                ?.times(1000)?.plus(state.timestamp.nanos / 1_000_000) else null,
         )
+
+        private fun point(lat: Float, lon: Float) = runCatching { GeoPoint(lat.toDouble(), lon.toDouble()) }
+            .getOrNull()?.takeUnless { it.latitude == 0.0 && it.longitude == 0.0 }
     }
 }
 

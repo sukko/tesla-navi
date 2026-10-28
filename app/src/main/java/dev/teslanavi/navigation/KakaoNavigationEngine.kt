@@ -24,6 +24,7 @@ import com.kakaomobility.knsdk.trip.kntrip.KNTrip
 import com.kakaomobility.knsdk.trip.kntrip.knroute.KNRoute
 import dev.teslanavi.BuildConfig
 import dev.teslanavi.protocol.NavigationDestination
+import dev.teslanavi.protocol.GeoPoint
 import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -34,7 +35,7 @@ import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 import kotlin.math.roundToInt
 
-/** Public, typed SDK calls only. The SDK owns GPS acquisition, road matching and rerouting. */
+/** SDK phone guidance plus conservative vehicle-position matching on its confirmed route. */
 class KakaoNavigationEngine(private val app: Application, private val settings: KakaoSettings) : CameraNavigationEngine {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val updates = MutableSharedFlow<NavigationUpdate>(extraBufferCapacity = 32, onBufferOverflow = BufferOverflow.DROP_OLDEST)
@@ -54,6 +55,13 @@ class KakaoNavigationEngine(private val app: Application, private val settings: 
     private var mode = NavigationMode.SAFETY
     private var routeInvalid = false
     private var expectedRoute: KNRoute? = null
+    private val vehicleFix = VehicleFixTracker()
+    private var heartbeat: Job? = null
+    private var assistBuild: Job? = null
+    private var assistRoute: KNRoute? = null
+    private var assist: VehicleRouteAssist? = null
+    private var phoneAnchor: KNLocation? = null
+    private var phoneAnchorMeters: Double? = null
 
     override suspend fun initialize(nativeKey: String) = initializationMutex.withLock {
         // An SDK initializer is process-wide. Caller cancellation does not start a competing initializer.
@@ -96,6 +104,9 @@ class KakaoNavigationEngine(private val app: Application, private val settings: 
         active.useAutoReroute = true
         active.useDirSound = false
         active.startWithoutTrip()
+        heartbeat = scope.launch {
+            while (isActive && token == operation) { delay(1000); refresh() }
+        }
         publish(NavigationEvent.Mode(NavigationMode.SAFETY, "현재 도로의 단속카메라를 안내합니다"))
         val point = (destination as? NavigationDestination.Active)?.point ?: return
         publish(NavigationEvent.Mode(NavigationMode.SAFETY, "차량 목적지까지 카카오 경로를 탐색합니다"))
@@ -231,6 +242,8 @@ class KakaoNavigationEngine(private val app: Application, private val settings: 
 
     private fun clearRouteData() {
         revision++
+        assistBuild?.cancel(); assistBuild = null
+        assistRoute = null; assist = null; phoneAnchor = null; phoneAnchorMeters = null
         safeties = emptyList(); location = null; locationAtMillis = null; lastGpsTimestamp = null
         expectedRoute = null
     }
@@ -240,6 +253,31 @@ class KakaoNavigationEngine(private val app: Application, private val settings: 
         val gps = guide?.gpsOrigin
         val current = guide?.location
         val fresh = gps != null && usable(gps) && locationAtMillis?.let { SystemClock.elapsedRealtime() - it <= 10000 } == true
+        val route = expectedRoute
+        if (mode == NavigationMode.ROUTE && !routeInvalid && route != null) {
+            prepareAssist(route)
+            val helper = assist
+            if (helper != null && fresh && current?.route == route && gps != null) {
+                val point = KNSDK.convertKATECToWGS84(gps.pos.x.roundToInt(), gps.pos.y.roundToInt())
+                val meters = current.distFromS.toDouble() / route.totalDist.coerceAtLeast(1) * helper.geometry.totalMeters
+                helper.anchor(GeoPoint(point.y, point.x), meters, locationAtMillis!!)
+                phoneAnchor = current; phoneAnchorMeters = meters
+            }
+            if (!fresh && helper != null) {
+                val now = SystemClock.elapsedRealtime()
+                val fix = vehicleFix.current(now)
+                val matched = fix?.let { helper.locate(it, now) }
+                if (fix != null && matched != null) {
+                    val offset = phoneAnchorMeters?.let {
+                        ((matched.meters - it) / helper.geometry.totalMeters * route.totalDist).roundToInt()
+                    }
+                    val road = if (offset != null && offset >= 0) phoneAnchor?.locationAfterDist(offset)?.roadType else null
+                    publish(NavigationEvent.Frame(helper.camerasAhead(matched.meters), fix.speedKph?.roundToInt(),
+                        fix.receivedAtMillis, roadClass(road), source = PositionSource.VEHICLE))
+                    return
+                }
+            }
+        }
         val cameras = if (fresh && current != null && !routeInvalid) safeties.mapNotNull { safety ->
             val camera = safety as? KNSafety_Camera ?: return@mapNotNull null
             val kind = kind(camera.code) ?: return@mapNotNull null
@@ -248,13 +286,55 @@ class KakaoNavigationEngine(private val app: Application, private val settings: 
             if (mode == NavigationMode.ROUTE && expectedRoute != null && current.route != expectedRoute) return@mapNotNull null
             val distance = current.distToLocation(camera.location)
             if (distance !in 0..10000) return@mapNotNull null
-            CameraReading("${camera.safetyId}:${camera.code.value}:${camera.location.pos.x.roundToInt()}:${camera.location.pos.y.roundToInt()}", kind, camera.speedLimit.takeIf { it > 0 },
+            CameraReading(cameraId(camera), kind, camera.speedLimit.takeIf { it > 0 },
                 distance, camera.isVariableSpeedLimit)
         } else emptyList()
         publish(NavigationEvent.Frame(cameras, gps?.takeIf { it.speedTrust }?.speed,
             if (fresh && current != null && !routeInvalid) locationAtMillis else null, roadClass(current?.roadType),
             if (fresh) gps?.let { NavigationPosition(it.pos.x.toDouble(), it.pos.y.toDouble()) } else null))
     }
+
+    /** Snapshot only documented route data; matching work runs away from the main thread. */
+    private fun prepareAssist(route: KNRoute) {
+        if (assistRoute == route) return
+        assistRoute = route
+        val token = revision
+        assistBuild = scope.launch {
+            try {
+                val points = route.routePolylineWGS84()?.takeIf { it.size in 2..200_000 }?.map { row ->
+                    GeoPoint(requireNotNull(row["y"]).toDouble(), requireNotNull(row["x"]).toDouble())
+                } ?: return@launch
+                val totalDist = route.totalDist.takeIf { it > 0 } ?: return@launch
+                val cameraData = route.safetyList().orEmpty().mapNotNull { safety ->
+                    val camera = safety as? KNSafety_Camera ?: return@mapNotNull null
+                    val kind = kind(camera.code) ?: return@mapNotNull null
+                    if (camera.location.route != route) return@mapNotNull null
+                    val pos = camera.location.pos
+                    val wgs = KNSDK.convertKATECToWGS84(pos.x.roundToInt(), pos.y.roundToInt())
+                    Triple(CameraReading(cameraId(camera), kind, camera.speedLimit.takeIf { it > 0 }, 0,
+                        camera.isVariableSpeedLimit), GeoPoint(wgs.y, wgs.x), camera.location.distFromS)
+                }
+                val result = withContext(Dispatchers.Default) {
+                    val geometry = RouteGeometry(points)
+                    val cameras = cameraData.mapNotNull { (reading, point, distance) ->
+                        ensureActive()
+                        val expected = distance.toDouble() / totalDist * geometry.totalMeters
+                        geometry.match(point, (expected - 100).coerceAtLeast(0.0)..
+                            (expected + 100).coerceAtMost(geometry.totalMeters), maxOffset = 30.0)
+                            ?.let { RouteCamera(reading, it.meters) }
+                    }
+                    VehicleRouteAssist(geometry, cameras)
+                }
+                if (token == revision && expectedRoute == route && !routeInvalid) { assist = result; refresh() }
+            } catch (error: CancellationException) { throw error }
+            catch (_: Exception) { /* Optional assistance must not interrupt normal SDK guidance. */ }
+        }
+    }
+
+    override fun updateVehicleFix(fix: VehicleGuidanceFix?) { vehicleFix.update(fix) }
+
+    private fun cameraId(camera: KNSafety_Camera) =
+        "${camera.safetyId}:${camera.code.value}:${camera.location.pos.x.roundToInt()}:${camera.location.pos.y.roundToInt()}"
 
     private fun usable(gps: KNGPSData): Boolean = gps.valid && gps.posTrust &&
         kotlin.math.abs(System.currentTimeMillis() - gps.timestamp.timeInMillis) <= 10000 && gps.pos.x.isFinite() && gps.pos.y.isFinite()
@@ -263,6 +343,7 @@ class KakaoNavigationEngine(private val app: Application, private val settings: 
 
     override fun pause() {
         operation++
+        heartbeat?.cancel(); heartbeat = null
         guidance?.let { detach(it); it.stop() }
         guidance = null
         clearRouteData()

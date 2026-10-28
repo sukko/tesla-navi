@@ -67,6 +67,17 @@ class CameraController(
                 val continuation = GuidanceContinuation()
                 val tick = MutableStateFlow(clock())
                 launch {
+                    var fixVin: String? = null
+                    drive.map { Triple(it.vin, it.phase, it.updatedAt to it.snapshot) }.distinctUntilChanged().collect { (vin, phase, data) ->
+                        if (fixVin != vin) { engine.updateVehicleFix(null); fixVin = vin }
+                        val (updatedAt, snapshot) = data
+                        val age = updatedAt?.let { System.currentTimeMillis() - it }
+                        engine.updateVehicleFix(if (phase == DrivePhase.CONNECTED && age != null && age in 0..10_000)
+                            snapshot?.location?.let { VehicleGuidanceFix(it, snapshot.speedKph, snapshot.gear,
+                                clock() - age, updatedAt) } else null)
+                    }
+                }
+                launch {
                     state.map { it.phoneFallback }.distinctUntilChanged().collectLatest { active ->
                         if (active) while (currentCoroutineContext().isActive) {
                             try { walkingSteps.collect { continuation.step(it, clock()) } }
@@ -127,8 +138,12 @@ class CameraController(
                                 val road = if (fresh) event.roadClass else RoadClass.UNKNOWN
                                 val speedCamera = cameras.firstOrNull { overSpeedPolicy.isOverSpeed(it, speed, road, settings.value) }
                                 val overSpeed = speedCamera != null
+                                if (fresh && event.source != _state.value.positionSource) onContinuation(
+                                    if (event.source == PositionSource.VEHICLE) "휴대폰 GPS 수신 중단 · 최신 차량 위치로 카메라 보조 안내"
+                                    else "휴대폰 GPS 수신 복구 · 카카오 위치 안내로 복귀")
                                 _state.update { it.copy(phase = if (fresh) CameraPhase.GUIDING else CameraPhase.WAITING_GPS,
                                     cameras = cameras.take(3), locationAtMillis = event.locationAtMillis,
+                                    positionSource = if (fresh) event.source else it.positionSource,
                                     currentSpeedKph = speed, roadClass = road, overSpeed = overSpeed, overSpeedCamera = speedCamera) }
                                 speaker.setOverSpeedAlert(overSpeed && !_state.value.muted)
                                 if (!fresh && tripSpeech == null) speaker.silence()
@@ -269,6 +284,7 @@ class CameraController(
         } catch (_: LinkageError) {
             _state.update { it.copy(phase = CameraPhase.ERROR, error = "이 기기에서 카카오 SDK를 불러오지 못했습니다.", message = "기기 호환성을 확인해 주세요") }
         } finally {
+            engine.updateVehicleFix(null)
             invalidate(); engine.pause(); speaker.close()
             _state.update { it.copy(phoneFallback = false, vehicleAvailable = false) }
             if (_state.value.phase != CameraPhase.ERROR && !_state.value.continuationExpired) configured(true)

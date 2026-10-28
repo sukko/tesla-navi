@@ -19,13 +19,15 @@ data class CameraReading(
 )
 
 enum class NavigationMode { SAFETY, ROUTE }
+enum class PositionSource { PHONE, VEHICLE }
 enum class RoadClass(val cameraAlertMeters: Int) { HIGHWAY(500), GENERAL(300), UNKNOWN(500) }
 /** Trusted original GPS position in the SDK's projected metre coordinates, before road snapping. */
 data class NavigationPosition(val xMeters: Double, val yMeters: Double)
 sealed interface NavigationEvent {
     data class Mode(val mode: NavigationMode, val message: String) : NavigationEvent
     data class Frame(val cameras: List<CameraReading>, val speedKph: Int?, val locationAtMillis: Long?,
-        val roadClass: RoadClass = RoadClass.UNKNOWN, val position: NavigationPosition? = null) : NavigationEvent
+        val roadClass: RoadClass = RoadClass.UNKNOWN, val position: NavigationPosition? = null,
+        val source: PositionSource = PositionSource.PHONE) : NavigationEvent
     data class RouteInvalidated(val message: String) : NavigationEvent
 }
 
@@ -35,6 +37,7 @@ interface CameraNavigationEngine {
     suspend fun initialize(nativeKey: String)
     suspend fun guide(destination: NavigationDestination)
     fun pause()
+    fun updateVehicleFix(fix: VehicleGuidanceFix?) = Unit
 }
 data class NavigationUpdate(val revision: Long, val event: NavigationEvent)
 
@@ -75,6 +78,7 @@ data class CameraState(
     val continuationEndReason: ContinuationEndReason? = null,
     /** Acknowledges the drive observer, so service teardown cannot race its fallback decision. */
     val vehicleAvailable: Boolean = false,
+    val positionSource: PositionSource = PositionSource.PHONE,
 )
 
 /** How far before the alert distance a slow voice may start preparing the announcement. */

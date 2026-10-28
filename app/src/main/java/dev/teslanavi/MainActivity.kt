@@ -686,6 +686,9 @@ private fun CameraCard(state: CameraState, hasKey: Boolean, onMute: (Boolean) ->
             Text("차량 연결 끊김 · 마지막 목적지와 휴대폰 GPS로 안내 중", color = Mint, fontSize = 12.sp)
             OutlinedButton(onClick = onStop, modifier = Modifier.fillMaxWidth()) { Text("안내 종료") }
         }
+        if (state.phase == CameraPhase.GUIDING && state.positionSource == dev.teslanavi.navigation.PositionSource.VEHICLE) {
+            Text("휴대폰 GPS 수신 대기 · 차량 위치로 보조 안내 중", color = Mint, fontSize = 12.sp)
+        }
         state.mode?.let {
             Text(if (it == NavigationMode.ROUTE) "카카오 경로 기준 · 테슬라 경로와 다를 수 있습니다" else "현재 주행 도로 기준 · 안전운행 모드", color = Muted, fontSize = 11.sp)
         }

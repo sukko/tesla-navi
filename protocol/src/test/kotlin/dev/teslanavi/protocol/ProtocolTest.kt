@@ -198,7 +198,7 @@ class ProtocolTest {
         val cancelled = client.readDriveState()
         assertEquals(NavigationDestination.None, cancelled.destination)
         assertNull(cancelled.distanceKm)
-        assertEquals(listOf(11, 12, 13), vehicle.counters)
+        assertEquals(listOf(11, 12, 13, 14, 15, 16), vehicle.counters)
     }
 
     @Test fun `odometer converts hundredths of a mile to kilometers and stays optional`() {
@@ -293,7 +293,7 @@ class ProtocolTest {
         assertEquals("차량 조회 실패: 권한 없음", assertFailsWith<IllegalStateException> { client.readChargeState() }.message)
         vehicle.nextState = DriveState.newBuilder().setActiveRouteDestination("서울역").build()
         assertEquals("서울역", (client.readDriveState().destination as NavigationDestination.Active).name)
-        assertEquals(listOf("charge", "charge", "charge", "drive"), vehicle.queries)
+        assertEquals(listOf("charge", "charge", "charge", "drive", "location"), vehicle.queries)
     }
 
     @Test fun `drive read reports vehicle error reason even when drive state is attached`() = runTest {
@@ -338,7 +338,7 @@ class ProtocolTest {
         client.authenticate()
     }
 
-    @Test fun `vehicle location is requested with drive state and parsed`() = runTest {
+    @Test fun `vehicle location is requested separately to fit BLE response size and parsed`() = runTest {
         val keys = TeslaKeys.generate()
         val vehicle = FakeVehicle(keys)
         val client = TeslaClient(VIN, keys, vehicle)
@@ -352,7 +352,7 @@ class ProtocolTest {
         assertEquals(1_760_000_000L, snapshot.location!!.gpsAsOf)
         assertEquals(48.28032, snapshot.speedKph!!, 0.0001)
         assertNull(client.locationRejection)
-        assertEquals(listOf(true), vehicle.locationRequested)
+        assertEquals(listOf("drive", "location"), vehicle.queries)
     }
 
     @Test fun `refused location keeps drive state and stops asking on that connection`() = runTest {
@@ -366,7 +366,7 @@ class ProtocolTest {
         assertNull(first.location)
         assertEquals("차량 조회 실패: unauthorized", client.locationRejection)
         client.readDriveState()
-        assertEquals(listOf(true, false, false), vehicle.locationRequested)
+        assertEquals(listOf("drive", "location", "drive"), vehicle.queries)
     }
 
     @Test fun `busy vehicle fault is not mistaken for a location refusal`() = runTest {
@@ -379,7 +379,7 @@ class ProtocolTest {
         assertNull(client.locationRejection)
         vehicle.nextLocation = LocationState.newBuilder().setLatitude(37.5f).setLongitude(127.0f).build()
         assertEquals(GeoPoint(37.5, 127.0), client.readDriveState().location!!.point)
-        assertEquals(listOf(true, true), vehicle.locationRequested)
+        assertEquals(listOf("drive", "drive", "location"), vehicle.queries)
     }
 
     @Test fun `drive refusal is not recorded as a location refusal`() = runTest {
@@ -389,7 +389,49 @@ class ProtocolTest {
         client.authenticate()
         assertEquals("차량 조회 실패: 차량 절전 중", assertFailsWith<IllegalStateException> { client.readDriveState() }.message)
         assertNull(client.locationRejection)
-        assertEquals(listOf(true, false), vehicle.locationRequested)
+        assertEquals(listOf("drive"), vehicle.queries)
+    }
+
+    @Test fun `temporary optional location faults and timeout do not lose drive or disable location`() = runTest {
+        for (fault in listOf(1, 6, 25, 0)) {
+            val keys = TeslaKeys.generate()
+            val vehicle = FakeVehicle(keys).apply { locationFaults += fault }
+            val client = TeslaClient(VIN, keys, vehicle)
+            client.authenticate()
+            vehicle.nextState = DriveState.newBuilder().setActiveRouteDestination("서울역").setSpeedFloat(30f).build()
+            assertEquals("서울역", (client.readDriveState().destination as NavigationDestination.Active).name)
+            assertNull(client.locationRejection)
+            assertEquals(1, vehicle.handshakes)
+            vehicle.nextLocation = LocationState.newBuilder().setLatitude(37.5f).setLongitude(127f).build()
+            assertEquals(GeoPoint(37.5, 127.0), client.readDriveState().location!!.point)
+            assertEquals(listOf("drive", "location", "drive", "location"), vehicle.queries)
+        }
+    }
+
+    @Test fun `native WGS estimated location is preferred and carries freshness metadata`() {
+        val state = LocationState.newBuilder().setLatitude(37.0f).setLongitude(126f)
+            .setNativeLatitude(37.5f).setNativeLongitude(127f)
+            .setNativeType(LocationState.GPSCoordinateType.newBuilder().setWGS(Void.getDefaultInstance()))
+            .setEstimatedGpsValid(true).setTimestamp(com.google.protobuf.Timestamp.newBuilder().setSeconds(1_760_000_000)).build()
+        val location = VehicleLocation.from(state)
+        assertEquals(GeoPoint(37.5, 127.0), location.point)
+        assertEquals(true, location.estimatedValid)
+        assertEquals(1_760_000_000_000L, location.timestampMillis)
+        val gcj = state.toBuilder().setNativeType(LocationState.GPSCoordinateType.newBuilder().setGCJ(Void.getDefaultInstance())).build()
+        assertEquals(GeoPoint(37.0, 126.0), VehicleLocation.from(gcj).point)
+    }
+
+    @Test fun `temporary location action refusal is retried without another authentication`() = runTest {
+        val keys = TeslaKeys.generate()
+        val vehicle = FakeVehicle(keys).apply { locationRefusal = "temporarily unavailable" }
+        val client = TeslaClient(VIN, keys, vehicle)
+        client.authenticate()
+        assertNull(client.readDriveState().location)
+        assertNull(client.locationRejection)
+        vehicle.locationRefusal = null
+        vehicle.nextLocation = LocationState.newBuilder().setLatitude(37.5f).setLongitude(127f).build()
+        assertNotNull(client.readDriveState().location)
+        assertEquals(1, vehicle.handshakes)
     }
 
     @Test fun `missing or zero vehicle coordinates are not a usable fix`() {
@@ -423,8 +465,10 @@ private class FakeVehicle(private val phone: KeyPair) : VehicleTransport {
     var driveRefusal: String? = null
     var nextLocation: LocationState? = null
     var refuseLocation = false
-    val locationRequested = mutableListOf<Boolean>()
+    var locationRefusal: String? = null
     val faults = ArrayDeque<Int>()
+    /** Zero simulates a silent optional query. */
+    val locationFaults = ArrayDeque<Int>()
     /** VCSEC's answer to the unauthenticated status request; null means VCSEC stays silent. */
     var sleepStatus: VehicleSleepStatus_E? = VehicleSleepStatus_E.VEHICLE_SLEEP_STATUS_AWAKE
     var vcsecRoutingAddress: com.google.protobuf.ByteString? = null
@@ -483,17 +527,19 @@ private class FakeVehicle(private val phone: KeyPair) : VehicleTransport {
             val actionBytes = TeslaSession.crypt(Cipher.DECRYPT_MODE, key, signature.nonce.toByteArray(),
                 request.protobufMessageAsBytes.toByteArray() + signature.tag.toByteArray(), requestAad)
             val query = com.tesla.generated.carserver.server.Action.parseFrom(actionBytes).vehicleAction.getVehicleData
-            check(query.hasGetDriveState() != query.hasGetChargeState())
-            queries += if (query.hasGetDriveState()) "drive" else "charge"
-            if (query.hasGetDriveState()) locationRequested += query.hasGetLocationState()
-            faults.removeFirstOrNull()?.let {
+            check(listOf(query.hasGetDriveState(), query.hasGetChargeState(), query.hasGetLocationState()).count { it } == 1)
+            queries += when { query.hasGetDriveState() -> "drive"; query.hasGetLocationState() -> "location"; else -> "charge" }
+            (if (query.hasGetLocationState()) locationFaults.removeFirstOrNull() else faults.removeFirstOrNull())?.let {
+                if (it == 0) return
                 incoming.send(reply.setSignedMessageStatus(MessageStatus.newBuilder().setSignedMessageFaultValue(it)).build().toByteArray())
                 return
             }
             val refusal = when {
                 query.hasGetDriveState() && driveRefusal != null -> driveRefusal
                 refuseLocation && query.hasGetLocationState() -> "unauthorized"
+                query.hasGetLocationState() && locationRefusal != null -> locationRefusal
                 query.hasGetDriveState() -> null
+                query.hasGetLocationState() -> null
                 else -> chargeRefusal
             }
             val response = Response.newBuilder().apply {
@@ -502,8 +548,9 @@ private class FakeVehicle(private val phone: KeyPair) : VehicleTransport {
                         .setResultReason(ResultReason.newBuilder().setPlainText(it)))
                 }
                 // A drive refusal still carries drive state, so the status alone must reject it.
-                if (query.hasGetDriveState()) setVehicleData(VehicleData.newBuilder().setDriveState(nextState).apply {
-                    if (query.hasGetLocationState() && refusal == null) this@FakeVehicle.nextLocation?.let { setLocationState(it) }
+                if (query.hasGetDriveState()) setVehicleData(VehicleData.newBuilder().setDriveState(nextState))
+                else if (query.hasGetLocationState()) setVehicleData(VehicleData.newBuilder().apply {
+                    if (refusal == null) this@FakeVehicle.nextLocation?.let { setLocationState(it) }
                 })
                 else if (refusal == null) setVehicleData(VehicleData.newBuilder().apply { this@FakeVehicle.chargeState?.let { setChargeState(it) } })
             }.build().toByteArray()

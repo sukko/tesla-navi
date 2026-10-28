@@ -36,6 +36,7 @@ class VehicleFault(val code: Int) : Exception(when (code) {
     4 -> "앱 키가 비활성화되어 있습니다. 차량의 키 목록을 확인해 주세요."
     7 -> "차량이 데이터 조회 권한을 허용하지 않았습니다."
     21 -> "차량 설정에서 모바일 액세스를 켜 주세요."
+    25 -> "차량 응답 크기가 BLE 전송 한도를 넘었습니다. (코드 25)"
     else -> "차량 인증 또는 조회 오류 (코드 $code). 다시 연결해 주세요."
 })
 
@@ -43,7 +44,6 @@ class VehicleFault(val code: Int) : Exception(when (code) {
 private class VehicleDataRejected(message: String) : IllegalStateException(message)
 
 private val SESSION_FAULTS = setOf(5, 6, 15, 17, 26)
-private val BUSY_FAULTS = setOf(1, 2, 11)
 
 /** One serialized request at a time; no unrelated or unauthenticated response becomes vehicle data. */
 class TeslaClient(private val vin: String, private val keys: KeyPair, private val transport: VehicleTransport, private val diagnostic: (String) -> Unit = {}) {
@@ -112,24 +112,28 @@ class TeslaClient(private val vin: String, private val keys: KeyPair, private va
         private set
 
     suspend fun readDriveState(): DriveSnapshot = mutex.withLock {
-        val withLocation = locationRejection == null
-        val response = try { vehicleData(driveQuery(withLocation), 8000, renewSession = true) }
-        catch (error: Exception) {
-            // A refused location request must not cost the drive state the vehicle already provides.
-            // Session and busy faults are retried as before and do not count as a refusal.
-            val refused = error is VehicleDataRejected ||
-                (error is VehicleFault && error.code !in SESSION_FAULTS && error.code !in BUSY_FAULTS)
-            if (!withLocation || !refused) throw error
-            vehicleData(driveQuery(withLocation = false), 8000, renewSession = true)
-                .also { locationRejection = error.message ?: "상세 사유 없음" }
-        }
+        // Combining drive and location easily exceeds the vehicle's BLE response-size ceiling.
+        val response = vehicleData(GetVehicleData.newBuilder().setGetDriveState(GetDriveState.getDefaultInstance()), 8000, renewSession = true)
         check(response.hasVehicleData() && response.vehicleData.hasDriveState()) { "차량에서 주행 상태를 제공하지 않았습니다." }
-        val data = response.vehicleData
-        DriveSnapshot.from(data.driveState, if (data.hasLocationState()) data.locationState else null)
+        val location = if (locationRejection != null) null else try {
+            val reply = vehicleData(GetVehicleData.newBuilder().setGetLocationState(GetLocationState.getDefaultInstance()), 2000, renewSession = false)
+            if (reply.hasVehicleData() && reply.vehicleData.hasLocationState()) reply.vehicleData.locationState else null
+        } catch (error: TimeoutCancellationException) {
+            currentCoroutineContext().ensureActive(); null
+        } catch (error: VehicleFault) {
+            // Size, busy and session faults are temporary. The next drive poll retries location.
+            if (error.code == 7) locationRejection = error.message
+            diagnostic("차량 위치 보조 조회 실패 · 코드 ${error.code} · 주행 조회 유지")
+            null
+        } catch (error: VehicleDataRejected) {
+            val reason = error.message.orEmpty().lowercase(java.util.Locale.ROOT)
+            if (listOf("unauthorized", "permission", "not supported", "권한", "지원하지").any { it in reason })
+                locationRejection = error.message
+            diagnostic("차량 위치 조회 거절 · 주행 조회 유지 · ${error.message}")
+            null
+        }
+        DriveSnapshot.from(response.vehicleData.driveState, location)
     }
-
-    private fun driveQuery(withLocation: Boolean) = GetVehicleData.newBuilder().setGetDriveState(GetDriveState.getDefaultInstance())
-        .apply { if (withLocation) setGetLocationState(GetLocationState.getDefaultInstance()) }
 
     /**
      * Null when the vehicle answers without charge_state. Never renews the session: a session

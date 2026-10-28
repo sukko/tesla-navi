@@ -16,6 +16,44 @@ import org.junit.Test
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class CameraControllerTest {
+    @Test fun freshVehicleFramesWarnAndPhoneRecoveryDoesNotRepeatPresence() = runTest {
+        val engine = FakeNavigationEngine()
+        val speaker = FakeSpeaker()
+        val controller = CameraController(engine, speaker) { testScheduler.currentTime }
+        val drive = MutableStateFlow(connected())
+        val job = backgroundScope.launch { controller.run("key", drive) }
+        runCurrent()
+        engine.frame(listOf(camera), 0, speed = 70, source = PositionSource.VEHICLE); runCurrent()
+        assertEquals(PositionSource.VEHICLE, controller.state.value.positionSource)
+        assertTrue(speaker.alarm)
+        val spoken = speaker.spoken.size
+        engine.frame(listOf(camera), 0, speed = 70); runCurrent()
+        assertEquals(PositionSource.PHONE, controller.state.value.positionSource)
+        assertEquals(spoken, speaker.spoken.size)
+        engine.frame(listOf(camera), -11_000, speed = 70, source = PositionSource.VEHICLE); runCurrent()
+        assertFalse(speaker.alarm)
+        assertTrue(controller.state.value.cameras.isEmpty())
+        job.cancelAndJoin()
+    }
+
+    @Test fun vehicleFixIsForwardedOncePerSnapshotAndClearedOnDisconnection() = runTest {
+        val engine = FakeNavigationEngine()
+        val speaker = FakeSpeaker()
+        val controller = CameraController(engine, speaker) { testScheduler.currentTime }
+        val initial = connected()
+        val drive = MutableStateFlow(initial.copy(snapshot = initial.snapshot!!.copy(location =
+            dev.teslanavi.protocol.VehicleLocation(GeoPoint(37.5, 127.0), 90, System.currentTimeMillis() / 1000)),
+            updatedAt = System.currentTimeMillis()))
+        val job = backgroundScope.launch { controller.run("key", drive) }
+        runCurrent()
+        assertNotNull(engine.fixes.last())
+        val count = engine.fixes.size
+        advanceTimeBy(5001); runCurrent()
+        assertEquals(count, engine.fixes.size)
+        drive.value = drive.value.copy(phase = DrivePhase.RECONNECTING); runCurrent()
+        assertNull(engine.fixes.last())
+        job.cancelAndJoin()
+    }
     @Test fun staleGpsDoesNotInterruptTripStartOrRepeatItAfterAnInterruptedPlayback() = runTest {
         val engine = FakeNavigationEngine()
         val speaker = FakeSpeaker().apply { deferCompletion = true }
@@ -749,6 +787,8 @@ class CameraControllerTest {
 }
 
 private class FakeNavigationEngine : CameraNavigationEngine {
+    val fixes = mutableListOf<VehicleGuidanceFix?>()
+    override fun updateVehicleFix(fix: VehicleGuidanceFix?) { fixes += fix }
     override val events = MutableSharedFlow<NavigationUpdate>(extraBufferCapacity = 32)
     override var revision = 0L
     val keys = mutableListOf<String>()
@@ -764,8 +804,8 @@ private class FakeNavigationEngine : CameraNavigationEngine {
     }
     override fun pause() { revision++ }
     fun frame(cameras: List<CameraReading>, locationAt: Long, atRevision: Long = revision,
-        road: RoadClass = RoadClass.UNKNOWN, speed: Int? = 50, position: NavigationPosition? = null) {
-        events.tryEmit(NavigationUpdate(atRevision, NavigationEvent.Frame(cameras, speed, locationAt, road, position)))
+        road: RoadClass = RoadClass.UNKNOWN, speed: Int? = 50, position: NavigationPosition? = null, source: PositionSource = PositionSource.PHONE) {
+        events.tryEmit(NavigationUpdate(atRevision, NavigationEvent.Frame(cameras, speed, locationAt, road, position, source)))
     }
 }
 
