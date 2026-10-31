@@ -7,7 +7,7 @@ class KoreanSpeechTextTest {
     @Test fun allTwelveSpeedLimitsUseTheRequestedReadings() {
         listOf("십", "이십", "삼십", "사십", "오십", "육십", "칠십", "팔십", "구십", "백", "백십", "백이십")
             .forEachIndexed { index, spoken ->
-                assertEquals("제한속도 ${spoken}킬로미터 초과입니다.",
+                assertEquals("제한속도 ${spoken} 킬로미터 초과입니다.",
                     KoreanSpeechText.normalize("제한속도 ${(index + 1) * 10}킬로미터 초과입니다."))
             }
     }
@@ -19,16 +19,24 @@ class KoreanSpeechTextTest {
     }
 
     @Test fun announcementsKeepWordingAndSpellOutEveryNumber() {
-        assertEquals("삼백미터 앞 과속 단속 카메라가 있습니다. 제한속도 시속 삼십킬로미터입니다.",
+        assertEquals("삼백 미터 앞 과속 단속 카메라가 있습니다. 제한속도 시속 삼십 킬로미터입니다.",
             KoreanSpeechText.normalize("300미터 앞 과속 단속 카메라가 있습니다. 제한속도 시속 30킬로미터입니다."))
-        assertEquals("제한속도 백십킬로미터 초과입니다.", KoreanSpeechText.normalize("제한속도 110킬로미터 초과입니다."))
-        assertEquals("천이백미터 앞 이동식 단속 카메라가 있습니다.", KoreanSpeechText.normalize("1200미터 앞 이동식 단속 카메라가 있습니다."))
+        assertEquals("제한속도 백십 킬로미터 초과입니다.", KoreanSpeechText.normalize("제한속도 110킬로미터 초과입니다."))
+        assertEquals("천이백 미터 앞 이동식 단속 카메라가 있습니다.", KoreanSpeechText.normalize("1200미터 앞 이동식 단속 카메라가 있습니다."))
     }
 
     @Test fun middleDotSeparatorsDecimalsAndGroupingAreSpeakable() {
         assertEquals("잠시 후 신호 과속 단속 카메라가 있습니다.", KoreanSpeechText.normalize("잠시 후 신호·과속 단속 카메라가 있습니다."))
-        assertEquals("일 점 오킬로미터", KoreanSpeechText.normalize("1.5킬로미터"))
-        assertEquals("천이백미터", KoreanSpeechText.normalize("1,200미터"))
+        assertEquals("일 점 오 킬로미터", KoreanSpeechText.normalize("1.5킬로미터"))
+        assertEquals("천이백 미터", KoreanSpeechText.normalize("1,200미터"))
         assertEquals("주행시작", KoreanSpeechText.normalize("주행시작"))
+    }
+
+    @Test fun repeatedNormalizationKeepsUnitSpacingStableAcrossSpeakerAndRenderer() {
+        val expected = "삼백 미터 앞 과속 단속 카메라가 있습니다. 제한속도 시속 오십 킬로미터입니다."
+        val normalized = KoreanSpeechText.normalize("300미터 앞 과속 단속 카메라가 있습니다. 제한속도 시속 50킬로미터입니다.")
+        assertEquals(expected, normalized)
+        assertEquals(expected, KoreanSpeechText.normalize(normalized))
+        assertEquals("제한속도 백이십 킬로미터 초과입니다.", KoreanSpeechText.normalize("제한속도 백이십킬로미터 초과입니다."))
     }
 }

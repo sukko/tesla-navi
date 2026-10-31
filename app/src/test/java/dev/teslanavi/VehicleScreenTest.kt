@@ -129,25 +129,11 @@ class VehicleScreenTest {
         compose.onNodeWithText("안내 음량이 0%입니다. 음량을 올린 뒤 테스트해 주세요.").assertExists()
     }
 
-    @Test fun aiVoiceNeedsTheModelDownloadBeforeItCanBeSelected() {
+    @Test fun aiVoiceRequiresAnApiKeyWithNoModelDownload() {
         compose.onNodeWithText("안내 설정").performClick()
         compose.onNode(hasText("휴대폰 기본 음성") and isSelectable()).performScrollTo().assertIsSelected()
-        compose.onNode(hasText("Supertonic 2 AI 음성") and isSelectable()).performScrollTo().assertIsNotEnabled()
-        compose.onNodeWithText("음성 모델 받기 (85MB)").performScrollTo().assertIsEnabled()
-    }
-
-    @Config(qualifiers = "w384dp-h832dp-xxhdpi")
-    @Test fun aiVoiceInfoOpensEvenBeforeTheModelIsDownloaded() {
-        compose.runOnIdle { ApplicationProvider.getApplicationContext<TeslaNaviApp>().features.setSettingsTab(true) }
-        compose.onNodeWithContentDescription("설정").performClick()
-        compose.onNodeWithText("안내 설정").performScrollTo().performClick()
-        compose.onNodeWithText("음성 모델 받기 (85MB)").performScrollTo()
-        compose.onNodeWithText("음성 모델(85MB)을 받아야 쓸 수 있음").assertIsDisplayed()
-        saveScreenshot("voice-choice-missing")
-        compose.onNodeWithContentDescription("Supertonic 2 AI 음성 안내").performClick()
-        compose.onNodeWithText("Wi-Fi", substring = true).assertIsDisplayed()
-        compose.onNodeWithText("닫기").performClick()
-        compose.onNode(hasText("휴대폰 기본 음성") and isSelectable()).assertIsSelected()
+        compose.onNode(hasText("Gemini AI 음성") and isSelectable()).performScrollTo().assertIsNotEnabled()
+        compose.onNodeWithText("Gemini API 키 등록").performScrollTo().assertIsEnabled()
     }
 
     @Test fun guidanceControlsSaveAndReopenAtSelectedValues() {

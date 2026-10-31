@@ -5,6 +5,7 @@ import android.media.AudioAttributes
 import android.media.AudioFocusRequest
 import android.media.AudioManager
 import android.media.AudioTrack
+import android.media.PlaybackParams
 import android.media.AudioFormat
 import android.os.Bundle
 import android.os.Handler
@@ -20,7 +21,9 @@ import java.io.File
 import java.util.concurrent.ConcurrentHashMap
 
 class AndroidCameraSpeaker(private val context: Context,
-    private val neural: PcmVoice? = null,
+    private val cloud: PcmVoice? = null,
+    private val playbackSpeed: () -> Float = { 1f },
+    private val synthesisTimeoutMillis: Long = 10_000,
     private val preferred: () -> GuidanceVoice = { GuidanceVoice.SYSTEM },
 ) : CameraSpeaker {
     private val audio = context.getSystemService(AudioManager::class.java)
@@ -73,11 +76,10 @@ class AndroidCameraSpeaker(private val context: Context,
 
     override suspend fun initialize(): String? {
         val systemError = initializeSystemVoice()
-        val voice = neural?.takeIf { preferred() == GuidanceVoice.SUPERTONIC } ?: return systemError
+        val voice = selectedVoice() ?: return systemError
         val error = voice.load()
-        if (error != null) { record("neural init failed; system fallback"); return systemError }
+        if (error != null) { record("cloud init failed; system fallback"); return systemError }
         needsInitialization = false
-        voice.prefetch("주행시작")
         return null
     }
 
@@ -171,7 +173,7 @@ class AndroidCameraSpeaker(private val context: Context,
     override fun speak(text: String): Boolean = speak(text) {}
 
     override fun speak(text: String, onComplete: (Boolean) -> Unit): Boolean {
-        val voice = neuralVoice()
+        val voice = readyCloudVoice()
         if (voice == null && tts == null) return false
         if (needsInitialization || utterance != null || gain == 0f || SystemClock.elapsedRealtime() < retryAfter) return false
         track?.pause()
@@ -183,13 +185,13 @@ class AndroidCameraSpeaker(private val context: Context,
         val id = UUID.randomUUID().toString()
         utterance = id
         completion = onComplete
-        record("speech requested id=$id kind=${if (text == "주행시작") "trip" else "guidance"} voice=${if (voice == null) "system" else "neural"} gain=$gain musicVolume=${audio.getStreamVolume(AudioManager.STREAM_MUSIC)}")
-        handler.postDelayed(speechTimeout, 10_000)
+        record("speech requested id=$id kind=${if (text == "주행시작") "trip" else "guidance"} voice=${if (voice == null) "system" else preferred().name.lowercase()} gain=$gain musicVolume=${audio.getStreamVolume(AudioManager.STREAM_MUSIC)}")
+        handler.postDelayed(speechTimeout, synthesisTimeoutMillis)
         if (voice != null) {
             voice.render(KoreanSpeechText.normalize(text)) { pcm -> handler.post {
                 if (id != utterance) return@post
                 if (pcm != null && play(pcm, id)) return@post
-                record("neural render failed; system fallback id=$id")
+                record("cloud render failed; system fallback id=$id")
                 speakSystem(text, id)
             } }
             return true
@@ -210,15 +212,19 @@ class AndroidCameraSpeaker(private val context: Context,
             return false
         }
         handler.removeCallbacks(speechTimeout)
-        handler.postDelayed(speechTimeout, 10_000)
+        handler.postDelayed(speechTimeout, synthesisTimeoutMillis)
         return true
     }
 
-    private fun neuralVoice() = neural?.takeIf { preferred() == GuidanceVoice.SUPERTONIC && it.ready }
-    override fun prefetch(text: String) { neuralVoice()?.prefetch(KoreanSpeechText.normalize(text)) }
+    private fun selectedVoice() = when (preferred()) {
+        GuidanceVoice.SYSTEM -> null
+        GuidanceVoice.GEMINI -> cloud
+    }
+    private fun readyCloudVoice() = selectedVoice()?.takeIf { it.ready }
+    override fun prefetch(text: String) { readyCloudVoice()?.prefetch(KoreanSpeechText.normalize(text)) }
 
     /** Static PCM playback. The marker ends the utterance; a timer covers devices that drop the marker callback. */
-    private fun play(pcm: Pcm, id: String, source: String = "neural"): Boolean = runCatching {
+    private fun play(pcm: Pcm, id: String, source: String = "gemini"): Boolean = runCatching {
         releaseVoiceTrack()
         val output = AudioTrack.Builder().setAudioAttributes(attributes)
             .setAudioFormat(AudioFormat.Builder().setSampleRate(pcm.sampleRate).setEncoding(AudioFormat.ENCODING_PCM_16BIT)
@@ -227,15 +233,20 @@ class AndroidCameraSpeaker(private val context: Context,
         voiceTrack = output
         check(output.write(pcm.bytes, 0, pcm.bytes.size) == pcm.bytes.size) { "음성 PCM 데이터 전송 실패" }
         output.setVolume(gain)
+        val requestedSpeed = if (source == "gemini") playbackSpeed().takeIf { it.isFinite() }?.coerceIn(.8f, 1.5f) ?: 1f else 1f
+        val speed = runCatching {
+            output.playbackParams = PlaybackParams().allowDefaults().setSpeed(requestedSpeed).setPitch(1f)
+            requestedSpeed
+        }.getOrDefault(1f)
         output.notificationMarkerPosition = pcm.frames
         output.setPlaybackPositionUpdateListener(object : AudioTrack.OnPlaybackPositionUpdateListener {
             override fun onMarkerReached(track: AudioTrack?) = finished(id, true, "$source playback done")
             override fun onPeriodicNotification(track: AudioTrack?) = Unit
         }, handler)
         handler.removeCallbacks(speechTimeout)
-        handler.postDelayed({ finished(id, true, "$source playback done") }, pcm.millis + 1000)
+        handler.postDelayed({ finished(id, true, "$source playback done") }, kotlin.math.ceil(pcm.millis / speed.toDouble()).toLong() + 1000)
         output.play()
-        record("$source playback started id=$id duration=${pcm.millis} gain=$gain")
+        record("$source playback started id=$id duration=${pcm.millis} speed=$speed pitch=1.0 gain=$gain")
     }.onFailure { android.util.Log.w("TeslaNaviAudio", "음성 PCM 출력 실패", it); releaseVoiceTrack() }.isSuccess
 
     private fun releaseVoiceTrack() { voiceTrack?.let { runCatching { it.stop() }; it.release() }; voiceTrack = null }

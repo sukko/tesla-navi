@@ -2,6 +2,8 @@
 package dev.teslanavi.navigation
 
 import android.app.Application
+import android.net.TrafficStats
+import android.os.Process
 import android.os.SystemClock
 import com.kakaomobility.knsdk.KNLanguageType
 import com.kakaomobility.knsdk.KNRoutePriority
@@ -36,7 +38,8 @@ import kotlin.coroutines.resumeWithException
 import kotlin.math.roundToInt
 
 /** SDK phone guidance plus conservative vehicle-position matching on its confirmed route. */
-class KakaoNavigationEngine(private val app: Application, private val settings: KakaoSettings) : CameraNavigationEngine {
+class KakaoNavigationEngine(private val app: Application, private val settings: KakaoSettings,
+    private val onUsage: (String) -> Unit = {}) : CameraNavigationEngine {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val updates = MutableSharedFlow<NavigationUpdate>(extraBufferCapacity = 32, onBufferOverflow = BufferOverflow.DROP_OLDEST)
     override val events = updates.asSharedFlow()
@@ -45,6 +48,9 @@ class KakaoNavigationEngine(private val app: Application, private val settings: 
     private var operation = 0L
     private var installed = false
     private var initializedKey: String? = null
+    override val needsInitialization get() = initializedKey == null
+    private val idleRelease = SdkIdleRelease(scope)
+    override fun prepareGuidance() = idleRelease.active()
     private var initialization: Deferred<Unit>? = null
     private val initializationMutex = Mutex()
     private var guidance: KNDriveGuidance? = null
@@ -62,8 +68,11 @@ class KakaoNavigationEngine(private val app: Application, private val settings: 
     private var assist: VehicleRouteAssist? = null
     private var phoneAnchor: KNLocation? = null
     private var phoneAnchorMeters: Double? = null
+    private var phoneAnchorAt: Long? = null
+    private val usage = NavigationUsage()
 
     override suspend fun initialize(nativeKey: String) = initializationMutex.withLock {
+        idleRelease.active()
         // An SDK initializer is process-wide. Caller cancellation does not start a competing initializer.
         initialization?.let { previous ->
             try { previous.await() }
@@ -94,6 +103,8 @@ class KakaoNavigationEngine(private val app: Application, private val settings: 
 
     override suspend fun guide(destination: NavigationDestination) {
         pause()
+        idleRelease.active()
+        usage.start(SystemClock.elapsedRealtime(), TrafficStats.getUidRxBytes(Process.myUid()), TrafficStats.getUidTxBytes(Process.myUid()))
         val token = operation
         val active = KNSDK.sharedGuidance() ?: error("카카오 안내 엔진을 준비하지 못했습니다.")
         guidance = active
@@ -105,7 +116,10 @@ class KakaoNavigationEngine(private val app: Application, private val settings: 
         active.useDirSound = false
         active.startWithoutTrip()
         heartbeat = scope.launch {
-            while (isActive && token == operation) { delay(1000); refresh() }
+            while (isActive && token == operation) {
+                delay(1000); refresh()
+                if (usage.due(SystemClock.elapsedRealtime())) reportUsage()
+            }
         }
         publish(NavigationEvent.Mode(NavigationMode.SAFETY, "현재 도로의 단속카메라를 안내합니다"))
         val point = (destination as? NavigationDestination.Active)?.point ?: return
@@ -116,6 +130,7 @@ class KakaoNavigationEngine(private val app: Application, private val settings: 
             val start = KNPOI("현재 위치", gps.pos.x.roundToInt(), gps.pos.y.roundToInt())
             val goal = KNPOI(destination.name ?: "차량 목적지", goalPos.x.roundToInt(), goalPos.y.roundToInt())
             val trip = withTimeout(30000) {
+                usage.routeRequested()
                 suspendCancellableCoroutine<KNTrip> { continuation ->
                     KNSDK.makeTripWithStart(start, goal, null) { error, result ->
                         if (continuation.isActive) {
@@ -200,7 +215,9 @@ class KakaoNavigationEngine(private val app: Application, private val settings: 
         }
         active.guideStateDelegate = object : KNGuidance_GuideStateDelegate {
             override fun guidanceGuideStarted(guidance: KNGuidance) = Unit
-            override fun guidanceCheckingRouteChange(guidance: KNGuidance) = Unit
+            override fun guidanceCheckingRouteChange(guidance: KNGuidance) {
+                if (token == operation) usage.sdkCheckingRoute()
+            }
             override fun guidanceRouteUnchanged(guidance: KNGuidance) {
                 if (token == operation) {
                     routeInvalid = false
@@ -243,7 +260,7 @@ class KakaoNavigationEngine(private val app: Application, private val settings: 
     private fun clearRouteData() {
         revision++
         assistBuild?.cancel(); assistBuild = null
-        assistRoute = null; assist = null; phoneAnchor = null; phoneAnchorMeters = null
+        assistRoute = null; assist = null; phoneAnchor = null; phoneAnchorMeters = null; phoneAnchorAt = null
         safeties = emptyList(); location = null; locationAtMillis = null; lastGpsTimestamp = null
         expectedRoute = null
     }
@@ -257,11 +274,12 @@ class KakaoNavigationEngine(private val app: Application, private val settings: 
         if (mode == NavigationMode.ROUTE && !routeInvalid && route != null) {
             prepareAssist(route)
             val helper = assist
-            if (helper != null && fresh && current?.route == route && gps != null) {
+            if (helper != null && fresh && current?.route == route && gps != null && phoneAnchorAt != locationAtMillis) {
                 val point = KNSDK.convertKATECToWGS84(gps.pos.x.roundToInt(), gps.pos.y.roundToInt())
                 val meters = current.distFromS.toDouble() / route.totalDist.coerceAtLeast(1) * helper.geometry.totalMeters
                 helper.anchor(GeoPoint(point.y, point.x), meters, locationAtMillis!!)
                 phoneAnchor = current; phoneAnchorMeters = meters
+                phoneAnchorAt = locationAtMillis
             }
             if (!fresh && helper != null) {
                 val now = SystemClock.elapsedRealtime()
@@ -342,11 +360,29 @@ class KakaoNavigationEngine(private val app: Application, private val settings: 
     private fun publish(event: NavigationEvent) { updates.tryEmit(NavigationUpdate(revision, event)) }
 
     override fun pause() {
+        reportUsage(end = true)
         operation++
         heartbeat?.cancel(); heartbeat = null
-        guidance?.let { detach(it); it.stop() }
+        guidance?.let { detach(it); it.useBackgroundUpdate = false; it.stop() }
         guidance = null
         clearRouteData()
+        if (installed) idleRelease.idle {
+            // Initialization is process-wide and may outlive its original caller.
+            initialization?.join()
+            if (guidance == null && installed) {
+                try {
+                    KNSDK.KNSDKRelease()
+                    installed = false; initializedKey = null; initialization = null
+                    onUsage("안내 대기 30초 · 카카오 SDK와 GPS 수집 해제")
+                } catch (error: Exception) {
+                    onUsage("카카오 SDK 대기 정리 실패 · ${error.javaClass.simpleName}")
+                }
+            }
+        }
+    }
+    private fun reportUsage(end: Boolean = false) {
+        usage.report(SystemClock.elapsedRealtime(), TrafficStats.getUidRxBytes(Process.myUid()),
+            TrafficStats.getUidTxBytes(Process.myUid()), end)?.let(onUsage)
     }
     private fun detach(active: KNDriveGuidance) {
         active.safetyGuideDelegate = null; active.locationGuideDelegate = null

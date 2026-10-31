@@ -1,19 +1,21 @@
 package dev.teslanavi.navigation
 
 /**
- * Shared text for system and Supertonic speech. Raw digits can be read inconsistently,
- * so numbers are spelled out in Sino-Korean, and separators become spaces.
+ * Shared text for system and Gemini speech. Raw digits can be read inconsistently,
+ * so numbers are spelled out in Sino-Korean, units are separated, and separators become spaces.
  */
 object KoreanSpeechText {
     private const val DIGITS = "영일이삼사오육칠팔구"
     private val decimal = Regex("""(\d+)\.(\d+)""")
     private val grouped = Regex("""\d{1,3}(,\d{3})+""")
     private val integer = Regex("""\d+""")
+    private val measurement = Regex("""([영일이삼사오육칠팔구십백천만억조])((?:킬로)?미터)""")
 
     fun normalize(text: String): String = text
         .replace(grouped) { it.value.replace(",", "") }
         .replace(decimal) { "${number(it.groupValues[1])} 점 ${it.groupValues[2].map { d -> DIGITS[d - '0'] }.joinToString("")}" }
         .replace(integer) { number(it.value) }
+        .replace(measurement) { "${it.groupValues[1]} ${it.groupValues[2]}" }
         .replace('·', ' ')
         .replace(Regex(" {2,}"), " ")
         .trim()

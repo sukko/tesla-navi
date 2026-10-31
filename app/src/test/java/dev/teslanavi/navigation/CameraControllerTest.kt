@@ -16,6 +16,23 @@ import org.junit.Test
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class CameraControllerTest {
+    @Test fun departingAfterIdleSdkReleaseReinitializesBeforeGuidance() = runTest {
+        val engine = FakeNavigationEngine()
+        val controller = CameraController(engine, FakeSpeaker()) { testScheduler.currentTime }
+        val drive = MutableStateFlow(connected())
+        val job = backgroundScope.launch { controller.run("key", drive) }
+        runCurrent()
+        assertEquals(1, engine.keys.size)
+        drive.value = connected(speed = 0.0, gear = Gear.PARK); runCurrent()
+        engine.needsInitialization = true
+        advanceTimeBy(60_000); runCurrent()
+        drive.value = connected(); runCurrent()
+        assertEquals(2, engine.keys.size)
+        assertEquals(2, engine.destinations.size)
+        advanceTimeBy(1001); runCurrent()
+        assertEquals(CameraPhase.WAITING_GPS, controller.state.value.phase)
+        job.cancelAndJoin()
+    }
     @Test fun freshVehicleFramesWarnAndPhoneRecoveryDoesNotRepeatPresence() = runTest {
         val engine = FakeNavigationEngine()
         val speaker = FakeSpeaker()
@@ -770,6 +787,27 @@ class CameraControllerTest {
         job.cancelAndJoin()
     }
 
+    @Test fun cosmeticDestinationChangesDoNotRestartRouteButRealMovesAndCancellationDo() = runTest {
+        val engine = FakeNavigationEngine()
+        val controller = CameraController(engine, FakeSpeaker()) { testScheduler.currentTime }
+        val drive = MutableStateFlow(connected())
+        val job = backgroundScope.launch { controller.run("key", drive) }
+        runCurrent()
+        for (offset in listOf(0.00005, 0.00010, 0.00015)) {
+            drive.value = connected(destination.copy(name = "이름 변경", point = destination.point!!.copy(
+                latitude = destination.point!!.latitude + offset)))
+            advanceTimeBy(5000); runCurrent()
+        }
+        assertEquals(1, engine.destinations.size)
+        // Compare against the last accepted goal, so accumulated drift cannot suppress a real change.
+        drive.value = connected(destination.copy(point = destination.point!!.copy(latitude = destination.point!!.latitude + 0.00030)))
+        runCurrent()
+        assertEquals(2, engine.destinations.size)
+        drive.value = connected(NavigationDestination.None); runCurrent()
+        assertEquals(NavigationDestination.None, engine.destinations.last())
+        job.cancelAndJoin()
+    }
+
     @Test fun nearestValidCameraIsSelectedWithoutAnnouncingPassedPoints() = runTest {
         val engine = FakeNavigationEngine()
         val speaker = FakeSpeaker()
@@ -787,6 +825,7 @@ class CameraControllerTest {
 }
 
 private class FakeNavigationEngine : CameraNavigationEngine {
+    override var needsInitialization = false
     val fixes = mutableListOf<VehicleGuidanceFix?>()
     override fun updateVehicleFix(fix: VehicleGuidanceFix?) { fixes += fix }
     override val events = MutableSharedFlow<NavigationUpdate>(extraBufferCapacity = 32)
@@ -795,7 +834,7 @@ private class FakeNavigationEngine : CameraNavigationEngine {
     val destinations = mutableListOf<NavigationDestination>()
     var initializationError: Exception? = null
     var initializationGate: Deferred<Unit>? = null
-    override suspend fun initialize(nativeKey: String) { initializationError?.let { throw it }; initializationGate?.await(); keys += nativeKey }
+    override suspend fun initialize(nativeKey: String) { initializationError?.let { throw it }; initializationGate?.await(); keys += nativeKey; needsInitialization = false }
     override suspend fun guide(destination: NavigationDestination) {
         revision++
         destinations += destination

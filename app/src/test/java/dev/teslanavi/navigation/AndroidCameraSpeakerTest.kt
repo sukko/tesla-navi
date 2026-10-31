@@ -27,6 +27,57 @@ import java.io.File
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34], application = TeslaNaviApp::class, shadows = [ControlledSpeech::class])
 class AndroidCameraSpeakerTest {
+    @Test fun geminiSelectionUsesCloudVoiceWithoutStartupRequestsAndFallsBackToPhoneVoice() = runTest {
+        val context = ApplicationProvider.getApplicationContext<TeslaNaviApp>()
+        shadowOf(context.getSystemService(AudioManager::class.java))
+            .setNextFocusRequestResponse(AudioManager.AUDIOFOCUS_REQUEST_GRANTED)
+        ShadowTextToSpeech.addLanguageAvailability(Locale.KOREAN)
+        val cloud = FakePcmVoice()
+        val speaker = AndroidCameraSpeaker(context, cloud) { GuidanceVoice.GEMINI }
+        val initialization = async(start = CoroutineStart.UNDISPATCHED) { speaker.initialize() }
+        val speech = shadowOf(ShadowTextToSpeech.getLastTextToSpeechInstance()) as ControlledSpeech
+        speech.onInitListener.onInit(TextToSpeech.SUCCESS)
+        assertNull(initialization.await())
+        try {
+            assertTrue(cloud.ready)
+            assertTrue("cloud requests must not start just from initialization", cloud.prefetched.isEmpty())
+            assertTrue(speaker.speak("300미터 앞"))
+            shadowOf(Looper.getMainLooper()).idle()
+            assertEquals(listOf("삼백 미터 앞"), cloud.rendered)
+            assertNotNull(voiceTrackOf(speaker))
+            assertNull(speech.lastId)
+            shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(1500))
+            cloud.pcm = null
+            assertTrue(speaker.speak("500미터 앞"))
+            shadowOf(Looper.getMainLooper()).idle()
+            assertEquals("오백 미터 앞", speech.lastText)
+        } finally { speaker.close() }
+    }
+
+    @Test fun fasterGeminiPlaybackPreservesPitchAndFinishesBeforeOriginalDuration() = runTest {
+        val context = ApplicationProvider.getApplicationContext<TeslaNaviApp>()
+        shadowOf(context.getSystemService(AudioManager::class.java)).setNextFocusRequestResponse(AudioManager.AUDIOFOCUS_REQUEST_GRANTED)
+        ShadowTextToSpeech.addLanguageAvailability(Locale.KOREAN)
+        val voice = FakePcmVoice().apply { pcm = Pcm(ByteArray(480_000), 24_000) }
+        val speaker = AndroidCameraSpeaker(context, voice, playbackSpeed = { 1.25f }) { GuidanceVoice.GEMINI }
+        val initialization = async(start = CoroutineStart.UNDISPATCHED) { speaker.initialize() }
+        val speech = shadowOf(ShadowTextToSpeech.getLastTextToSpeechInstance()) as ControlledSpeech
+        speech.onInitListener.onInit(TextToSpeech.SUCCESS)
+        assertNull(initialization.await())
+        try {
+            val results = mutableListOf<Boolean>()
+            speaker.speak("카메라 안내") { results += it }
+            shadowOf(Looper.getMainLooper()).idle()
+            val output = checkNotNull(voiceTrackOf(speaker))
+            assertEquals(1.25f, output.playbackParams.speed, .001f)
+            assertEquals(1f, output.playbackParams.pitch, .001f)
+            shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(8500))
+            assertTrue(results.isEmpty())
+            shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(600))
+            assertEquals(listOf(true), results)
+        } finally { speaker.close() }
+    }
+
     @Test fun systemSynthesisPlaysThroughAppTrackAndCompletesOnlyAfterPlayback() = runTest {
         val context = ApplicationProvider.getApplicationContext<TeslaNaviApp>()
         shadowOf(context.getSystemService(AudioManager::class.java))
@@ -95,7 +146,7 @@ class AndroidCameraSpeakerTest {
             listOf("십", "이십", "삼십", "사십", "오십", "육십", "칠십", "팔십", "구십", "백", "백십", "백이십")
                 .forEachIndexed { index, limit ->
                     assertTrue(speaker.speak("제한속도 ${(index + 1) * 10}킬로미터 초과입니다."))
-                    assertEquals("제한속도 ${limit}킬로미터 초과입니다.", speech.lastText)
+                    assertEquals("제한속도 ${limit} 킬로미터 초과입니다.", speech.lastText)
                     speech.utteranceProgressListener.onDone(speech.lastId)
             shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(1500))
                     shadowOf(Looper.getMainLooper()).idle()
@@ -108,7 +159,7 @@ class AndroidCameraSpeakerTest {
         shadowOf(context.getSystemService(AudioManager::class.java))
             .setNextFocusRequestResponse(AudioManager.AUDIOFOCUS_REQUEST_GRANTED)
         ShadowTextToSpeech.addLanguageAvailability(Locale.KOREAN)
-        var preferred = GuidanceVoice.SUPERTONIC
+        var preferred = GuidanceVoice.GEMINI
         val voice = FakePcmVoice()
         val speaker = AndroidCameraSpeaker(context, voice) { preferred }
         val initialization = async(start = CoroutineStart.UNDISPATCHED) { speaker.initialize() }
@@ -125,7 +176,7 @@ class AndroidCameraSpeakerTest {
             assertNull(recovery.await())
             assertFalse(speaker.needsInitialization)
             assertTrue(speaker.speak("제한속도 120킬로미터 초과입니다."))
-            assertEquals("제한속도 백이십킬로미터 초과입니다.", speech.lastText)
+            assertEquals("제한속도 백이십 킬로미터 초과입니다.", speech.lastText)
             assertTrue(voice.rendered.isEmpty())
         } finally { speaker.close() }
     }
@@ -134,8 +185,8 @@ class AndroidCameraSpeakerTest {
         shadowOf(context.getSystemService(AudioManager::class.java))
             .setNextFocusRequestResponse(AudioManager.AUDIOFOCUS_REQUEST_GRANTED)
         ShadowTextToSpeech.addLanguageAvailability(Locale.KOREAN)
-        val voice = FakePcmVoice()
-        val speaker = AndroidCameraSpeaker(context, voice) { GuidanceVoice.SUPERTONIC }
+        val voice = FakePcmVoice().apply { pcm = Pcm(ByteArray(2 * 24_000 * 10), 24_000) }
+        val speaker = AndroidCameraSpeaker(context, voice) { GuidanceVoice.GEMINI }
         val initialization = async(start = CoroutineStart.UNDISPATCHED) { speaker.initialize() }
         val speech = shadowOf(ShadowTextToSpeech.getLastTextToSpeechInstance()) as ControlledSpeech
         speech.onInitListener.onInit(TextToSpeech.SUCCESS)
@@ -144,9 +195,14 @@ class AndroidCameraSpeakerTest {
             val results = mutableListOf<Boolean>()
             assertTrue(speaker.speak("카메라 안내") { results += it })
             shadowOf(Looper.getMainLooper()).idle()
+            val output = checkNotNull(voiceTrackOf(speaker))
+            assertEquals(24_000, output.sampleRate)
+            shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(10_999))
             assertTrue(results.isEmpty())
-            shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(voice.pcm!!.millis + 1001))
+            assertNotNull(voiceTrackOf(speaker))
+            shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(2))
             assertEquals(listOf(true), results)
+            assertNull(voiceTrackOf(speaker))
             voice.pcm = null
             assertTrue(speaker.speak("다음 카메라") { results += it })
             shadowOf(Looper.getMainLooper()).idle()
@@ -164,7 +220,7 @@ class AndroidCameraSpeakerTest {
             .setNextFocusRequestResponse(AudioManager.AUDIOFOCUS_REQUEST_GRANTED)
         ShadowTextToSpeech.addLanguageAvailability(Locale.KOREAN)
         val voice = FakePcmVoice().apply { defer = true }
-        val speaker = AndroidCameraSpeaker(context, voice) { GuidanceVoice.SUPERTONIC }
+        val speaker = AndroidCameraSpeaker(context, voice) { GuidanceVoice.GEMINI }
         val initialization = async(start = CoroutineStart.UNDISPATCHED) { speaker.initialize() }
         val speech = shadowOf(ShadowTextToSpeech.getLastTextToSpeechInstance()) as ControlledSpeech
         speech.onInitListener.onInit(TextToSpeech.SUCCESS)
@@ -251,12 +307,12 @@ class AndroidCameraSpeakerTest {
             .setNextFocusRequestResponse(AudioManager.AUDIOFOCUS_REQUEST_GRANTED)
         ShadowTextToSpeech.addLanguageAvailability(Locale.KOREAN)
         val voice = FakePcmVoice()
-        val speaker = AndroidCameraSpeaker(context, voice) { GuidanceVoice.SUPERTONIC }
+        val speaker = AndroidCameraSpeaker(context, voice) { GuidanceVoice.GEMINI }
         val initialization = async(start = CoroutineStart.UNDISPATCHED) { speaker.initialize() }
         val speech = shadowOf(ShadowTextToSpeech.getLastTextToSpeechInstance()) as ControlledSpeech
         speech.onInitListener.onInit(TextToSpeech.SUCCESS)
         assertNull(initialization.await())
-        assertEquals(listOf("주행시작"), voice.prefetched)
+        assertTrue(voice.prefetched.isEmpty())
         try {
             assertTrue(speaker.speak("300미터 앞 과속 단속 카메라가 있습니다."))
             shadowOf(Looper.getMainLooper()).idle()
@@ -265,7 +321,7 @@ class AndroidCameraSpeakerTest {
             assertNull("system TTS stays silent", speech.lastId)
             assertFalse(speaker.speak("겹치는 안내"))
             speaker.prefetch("제한속도 60킬로미터 초과입니다.")
-            assertEquals("제한속도 육십킬로미터 초과입니다.", voice.prefetched.last())
+            assertEquals("제한속도 육십 킬로미터 초과입니다.", voice.prefetched.last())
             shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(voice.pcm!!.millis + 1001))
             assertNull(voiceTrackOf(speaker))
             voice.pcm = null
@@ -282,13 +338,13 @@ class AndroidCameraSpeakerTest {
         } finally { speaker.close() }
     }
 
-    @Test fun systemVoiceSelectionOrUnavailableModelKeepsPhoneVoice() = runTest {
+    @Test fun systemVoiceSelectionOrUnavailableCloudKeepsPhoneVoice() = runTest {
         val context = ApplicationProvider.getApplicationContext<TeslaNaviApp>()
         shadowOf(context.getSystemService(AudioManager::class.java))
             .setNextFocusRequestResponse(AudioManager.AUDIOFOCUS_REQUEST_GRANTED)
         ShadowTextToSpeech.addLanguageAvailability(Locale.KOREAN)
         listOf(FakePcmVoice() to GuidanceVoice.SYSTEM,
-            FakePcmVoice(loadError = "Supertonic 음성 모델을 먼저 받아 주세요.") to GuidanceVoice.SUPERTONIC).forEach { (voice, choice) ->
+            FakePcmVoice(loadError = "Gemini API 키를 먼저 등록해 주세요.") to GuidanceVoice.GEMINI).forEach { (voice, choice) ->
             val speaker = AndroidCameraSpeaker(context, voice) { choice }
             val initialization = async(start = CoroutineStart.UNDISPATCHED) { speaker.initialize() }
             val speech = shadowOf(ShadowTextToSpeech.getLastTextToSpeechInstance()) as ControlledSpeech

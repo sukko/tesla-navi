@@ -33,6 +33,7 @@ data class DriveState(
     val automatic: Boolean = false,
     /** The last attempt ended because VCSEC reported the vehicle asleep. */
     val asleep: Boolean = false,
+    val pollIntervalMillis: Long = VehiclePoll.DRIVING_INTERVAL,
 ) {
     val active get() = phase !in setOf(DrivePhase.IDLE, DrivePhase.ERROR)
 }
@@ -149,21 +150,26 @@ class DriveController(private val context: Context, private val keyStore: Vehicl
                 _state.update { it.copy(events = write(attempts.connected())) }
                 status("목적지 확인 중", DrivePhase.CONNECTED)
                 app.autoConnect.verified(profile.vin)
-                val reader = DriveStateReader(client::readDriveState, client::authenticate) { status(it) }
+                val vehiclePoll = VehiclePoll()
+                var includeLocation = true
+                val reader = DriveStateReader({ client.readDriveState(includeLocation) }, client::authenticate) { status(it) }
                 var firstSnapshot = true
                 val batteryPoll = BatteryPoll()
                 lastChargeNote = null
                 val locationProbe = LocationProbe()
                 while (currentCoroutineContext().isActive) {
+                    includeLocation = vehiclePoll.locationDue(android.os.SystemClock.elapsedRealtime())
                     val snapshot = reader.next()
                     if (firstSnapshot) {
                         note("주행 정보 수신 · 기어 ${snapshot.gear} · 속도 ${snapshot.speedKph?.toInt() ?: "미제공"} km/h")
                         firstSnapshot = false
                     }
                     val polledAt = android.os.SystemClock.elapsedRealtime()
-                    locationProbe.observe(snapshot.location, client.locationRejection, System.currentTimeMillis())?.let(::note)
+                    vehiclePoll.received(snapshot, includeLocation, polledAt)
+                    if (includeLocation) locationProbe.observe(snapshot.location, client.locationRejection, System.currentTimeMillis())?.let(::note)
                     val previous = _state.value.snapshot?.destination
-                    _state.update { it.copy(snapshot = snapshot, updatedAt = System.currentTimeMillis(), error = null) }
+                    _state.update { it.copy(snapshot = snapshot, updatedAt = System.currentTimeMillis(), error = null,
+                        pollIntervalMillis = vehiclePoll.intervalMillis) }
                     if (previous != snapshot.destination) status(when (snapshot.destination) {
                         NavigationDestination.None -> "차량에 설정된 목적지가 없습니다"
                         is NavigationDestination.Active -> "차량 목적지를 확인했습니다"
@@ -171,8 +177,8 @@ class DriveController(private val context: Context, private val keyStore: Vehicl
                     failures = 0
                     if (app.features.logbook.value) recordTrip(profile.vin, snapshot, batteryPoll, polledAt)
                     if (batteryPoll.due(polledAt)) readBattery(client, profile.vin, batteryPoll, snapshot.odometerKm)
-                    // The 4s battery read fits inside the 5s drive cadence instead of delaying the next drive read.
-                    withTimeoutOrNull((polledAt + 5000 - android.os.SystemClock.elapsedRealtime()).coerceAtLeast(1)) { refresh.receive() }
+                    // Battery reads fit inside this wait. Manual refresh can still wake it immediately.
+                    withTimeoutOrNull((polledAt + vehiclePoll.intervalMillis - android.os.SystemClock.elapsedRealtime()).coerceAtLeast(1)) { refresh.receive() }
                 }
             } catch (error: Exception) {
                 if (error is CancellationException && error !is TimeoutCancellationException) throw error

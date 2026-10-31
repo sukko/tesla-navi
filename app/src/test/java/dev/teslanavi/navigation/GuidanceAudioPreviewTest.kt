@@ -26,7 +26,9 @@ class GuidanceAudioPreviewTest {
         runCurrent()
         assertEquals(35, output.appliedVolume)
         assertEquals(1, output.initializations)
-        assertTrue(output.spoken.single().contains("300미터 앞"))
+        val expected = CameraAlertPolicy().next(CameraReading("sample", CameraKind.SPEED, 60, 300), RoadClass.GENERAL, 0)!!.text
+        assertEquals(expected, output.spoken.single())
+        assertEquals("삼백 미터 앞 과속 단속 카메라가 있습니다. 제한속도 시속 육십 킬로미터입니다.", KoreanSpeechText.normalize(expected))
         assertEquals(PreviewSound.CAMERA_VOICE, preview.state.value.playing)
         output.finish(true)
         advanceTimeBy(10_001); runCurrent()

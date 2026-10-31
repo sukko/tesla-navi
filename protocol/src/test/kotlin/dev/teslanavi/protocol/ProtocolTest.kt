@@ -34,6 +34,20 @@ private fun String.hex() = chunked(2).map { it.toInt(16).toByte() }.toByteArray(
 private const val VIN = "5YJ3E1EA1MF123456"
 
 class ProtocolTest {
+    @Test fun `parked drive-only read does not request location or reuse its old coordinates`() = runTest {
+        val keys = TeslaKeys.generate()
+        val vehicle = FakeVehicle(keys)
+        val client = TeslaClient(VIN, keys, vehicle)
+        client.authenticate()
+        vehicle.nextLocation = LocationState.newBuilder().setLatitude(37.5f).setLongitude(127f).build()
+        assertNotNull(client.readDriveState().location)
+        vehicle.nextState = DriveState.newBuilder().setShiftState(ShiftState.newBuilder().setP(Void.getDefaultInstance())).build()
+        assertNull(client.readDriveState(includeLocation = false).location)
+        assertNull(client.locationRejection)
+        assertEquals(listOf("drive", "location", "drive"), vehicle.queries)
+        assertNotNull(client.readDriveState().location)
+        assertEquals(listOf("drive", "location", "drive", "drive", "location"), vehicle.queries)
+    }
     private fun enrollmentReply(code: Int) = FromVCSECMessage.newBuilder().setCommandStatus(
         CommandStatus.newBuilder().setOperationStatusValue(2).setWhitelistOperationStatus(
             WhitelistOperation_status.newBuilder().setWhitelistOperationInformationValue(code)

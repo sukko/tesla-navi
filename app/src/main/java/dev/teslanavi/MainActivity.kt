@@ -592,7 +592,8 @@ private fun DestinationCard(selected: String?, state: DriveState, onRefresh: () 
     val current = state.takeIf { it.vin == selected }
     val snapshot = current?.snapshot
     val age = current?.updatedAt?.let { ((now - it).coerceAtLeast(0) / 1000).toInt() }
-    val stale = age != null && age >= 15
+    val intervalSeconds = (current?.pollIntervalMillis ?: 5_000) / 1000
+    val stale = age != null && age >= intervalSeconds + 10
     val destination = snapshot?.destination
     AppCard {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
@@ -614,8 +615,9 @@ private fun DestinationCard(selected: String?, state: DriveState, onRefresh: () 
         Text(when {
             age == null -> "연결 후 차량에서 목적지를 자동으로 읽습니다."
             stale -> "마지막 수신 ${age}초 전 · 표시한 목적지를 확인해 주세요."
-            else -> "${age}초 전 확인 · 5초마다 갱신"
+            else -> "${age}초 전 확인 · 차량 정보 ${intervalSeconds}초마다 확인"
         }, color = Muted, fontSize = 12.sp)
+        if (snapshot != null) Text("목적지가 바뀌거나 경로를 이탈하면 경로를 다시 탐색합니다", color = Muted, fontSize = 11.sp)
     }
 }
 
@@ -1161,7 +1163,8 @@ private fun GuidanceSettingsContent(app: TeslaNaviApp, guidanceActive: Boolean,
     section: @Composable (@Composable ColumnScope.() -> Unit) -> Unit) {
     val settings = app.guidance
     val options by settings.options.collectAsStateWithLifecycle()
-    val model by app.voiceModel.state.collectAsStateWithLifecycle()
+    val geminiKey by app.geminiSettings.state.collectAsStateWithLifecycle()
+    val geminiStatus by app.gemini.status.collectAsStateWithLifecycle()
     var volume by remember(options.volumePercent) { mutableFloatStateOf(options.volumePercent.toFloat()) }
     var highway by remember(options.highwayMeters) { mutableFloatStateOf(options.highwayMeters.toFloat()) }
     var general by remember(options.generalMeters) { mutableFloatStateOf(options.generalMeters.toFloat()) }
@@ -1172,12 +1175,14 @@ private fun GuidanceSettingsContent(app: TeslaNaviApp, guidanceActive: Boolean,
         Text("휴대폰 미디어 음량 기준 · 음성과 경고음에 함께 적용", fontSize = 12.sp, color = Muted)
     }
     section {
-        GuidanceVoiceChoice(options.voice, model, onSelect = app::selectVoice, onDownload = app::downloadVoiceModel,
-            onCancel = app.voiceModel::cancel, onDelete = app::deleteVoiceModel,
-            speaker = options.supertonicSpeaker, onSpeaker = settings::supertonicSpeaker)
+        GuidanceVoiceChoice(options.voice, onSelect = app::selectVoice,
+            speaker = options.geminiSpeaker, onSpeaker = app::selectGeminiSpeaker,
+            speedPercent = options.geminiSpeedPercent, onSpeed = settings::geminiSpeed,
+            geminiKey = geminiKey, geminiStatus = geminiStatus, onSaveGemini = app::saveGeminiKey, onDeleteGemini = app::deleteGeminiKey)
     }
-    section { GuidanceSoundCheck(volume.roundToInt(), guidanceActive, app::guidanceSpeaker,
-        selectionKey = "${options.voice}/${options.supertonicSpeaker}") }
+    section { GuidanceSoundCheck(volume.roundToInt(), guidanceActive, app::guidancePreviewSpeaker,
+        selectionKey = "${options.voice}/${options.geminiSpeaker}/${options.geminiSpeedPercent}/${geminiKey.revision}",
+        voiceStatus = geminiStatus.takeIf { options.voice == GuidanceVoice.GEMINI }) }
     section { DepartureDetectionControl(app.walkingSteps) }
     section {
         Text("고속도로 ${highway.roundToInt()} m 전", fontWeight = FontWeight.SemiBold)

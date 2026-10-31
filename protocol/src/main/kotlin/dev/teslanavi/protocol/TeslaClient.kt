@@ -111,11 +111,11 @@ class TeslaClient(private val vin: String, private val keys: KeyPair, private va
     @Volatile var locationRejection: String? = null
         private set
 
-    suspend fun readDriveState(): DriveSnapshot = mutex.withLock {
+    suspend fun readDriveState(includeLocation: Boolean = true): DriveSnapshot = mutex.withLock {
         // Combining drive and location easily exceeds the vehicle's BLE response-size ceiling.
         val response = vehicleData(GetVehicleData.newBuilder().setGetDriveState(GetDriveState.getDefaultInstance()), 8000, renewSession = true)
         check(response.hasVehicleData() && response.vehicleData.hasDriveState()) { "차량에서 주행 상태를 제공하지 않았습니다." }
-        val location = if (locationRejection != null) null else try {
+        val location = if (!includeLocation || locationRejection != null) null else try {
             val reply = vehicleData(GetVehicleData.newBuilder().setGetLocationState(GetLocationState.getDefaultInstance()), 2000, renewSession = false)
             if (reply.hasVehicleData() && reply.vehicleData.hasLocationState()) reply.vehicleData.locationState else null
         } catch (error: TimeoutCancellationException) {

@@ -173,31 +173,36 @@ class CameraController(
                     }
                 }
                 launch {
-                    while (isActive) {
-                        delay(1000)
-                        tick.value = clock()
-                        if (pendingTrip && acceptingFrames && !_state.value.muted && _state.value.voiceError == null) {
-                            val token = Any()
-                            tripSpeech = token
-                            val accepted = speaker.speak("주행시작") {
-                                if (tripSpeech === token) tripSpeech = null
-                            }
-                            // This one-off trip event must not loop when playback is interrupted.
-                            // Camera and overspeed warnings still commit only on completion.
-                            if (accepted) {
-                                pendingTrip = false; tripAnnounced = true
-                            } else if (tripSpeech === token) {
-                                tripSpeech = null
+                    state.map { when (it.phase) {
+                        CameraPhase.IDLE, CameraPhase.WAITING_DRIVE, CameraPhase.WAITING_VEHICLE -> 5_000L
+                        else -> 1_000L
+                    } }
+                        .distinctUntilChanged().collectLatest { interval ->
+                            while (isActive) {
+                                delay(interval)
+                                tick.value = clock()
+                                if (pendingTrip && acceptingFrames && !_state.value.muted && _state.value.voiceError == null) {
+                                    val token = Any()
+                                    tripSpeech = token
+                                    val accepted = speaker.speak("주행시작") {
+                                        if (tripSpeech === token) tripSpeech = null
+                                    }
+                                    // The trip event must not loop when playback is interrupted.
+                                    if (accepted) {
+                                        pendingTrip = false; tripAnnounced = true
+                                    } else if (tripSpeech === token) {
+                                        tripSpeech = null
+                                    }
+                                }
+                                if (_state.value.locationAtMillis?.let { clock() - it > 10000 } == true) {
+                                    speaker.setOverSpeedAlert(false)
+                                    if (tripSpeech == null) speaker.silence()
+                                    _state.update { it.copy(phase = CameraPhase.WAITING_GPS, cameras = emptyList(),
+                                        locationAtMillis = null, currentSpeedKph = null, roadClass = RoadClass.UNKNOWN,
+                                        overSpeed = false, overSpeedCamera = null, message = "현재 위치를 다시 확인하고 있습니다") }
+                                }
                             }
                         }
-                        if (_state.value.locationAtMillis?.let { clock() - it > 10000 } == true) {
-                            speaker.setOverSpeedAlert(false)
-                            if (tripSpeech == null) speaker.silence()
-                            _state.update { it.copy(phase = CameraPhase.WAITING_GPS, cameras = emptyList(),
-                                locationAtMillis = null, currentSpeedKph = null, roadClass = RoadClass.UNKNOWN,
-                                overSpeed = false, overSpeedCamera = null, message = "현재 위치를 다시 확인하고 있습니다") }
-                        }
-                    }
                 }
                 combine(drive, tick) { current, now ->
                     if (tripVin != current.vin) movement.update(null, false, null)
@@ -228,7 +233,9 @@ class CameraController(
                     }
                     GuidanceTarget(current.vin, available || fallback != null, moving || fallback != null,
                         if (available) current.snapshot?.destination else fallback)
-                }.distinctUntilChanged().collectLatest { (_, available, moving, destination) ->
+                }.distinctUntilChanged { old, new -> old.vin == new.vin && old.available == new.available &&
+                    old.moving == new.moving && (!new.moving || sameGuidanceDestination(old.destination, new.destination))
+                }.collectLatest { (_, available, moving, destination) ->
                     invalidate()
                     engine.pause()
                     if (!available || destination == null) {
@@ -242,7 +249,8 @@ class CameraController(
                         var failures = 0
                         while (currentCoroutineContext().isActive) {
                             try {
-                                if (!initialized) {
+                                engine.prepareGuidance()
+                                if (!initialized || engine.needsInitialization) {
                                     _state.update { it.copy(phase = CameraPhase.INITIALIZING, message = "카카오내비를 준비하고 있습니다", error = null) }
                                     engine.initialize(nativeKey)
                                     initialized = true

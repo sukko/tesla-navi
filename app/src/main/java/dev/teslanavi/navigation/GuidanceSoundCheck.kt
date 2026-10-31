@@ -16,7 +16,8 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 
 @Composable
-fun GuidanceSoundCheck(volumePercent: Int, guidanceActive: Boolean, createSpeaker: () -> CameraSpeaker, selectionKey: String = "") {
+fun GuidanceSoundCheck(volumePercent: Int, guidanceActive: Boolean, createSpeaker: () -> CameraSpeaker, selectionKey: String = "",
+    voiceStatus: String? = null) {
     val scope = rememberCoroutineScope()
     val preview = remember(scope) { GuidanceAudioPreview(scope, createSpeaker) }
     val state by preview.state.collectAsStateWithLifecycle()
@@ -39,6 +40,7 @@ fun GuidanceSoundCheck(volumePercent: Int, guidanceActive: Boolean, createSpeake
             TextButton(onClick = preview::stop) { Text("테스트 중지") }
         }
         state.message?.let { Text(it) }
+        voiceStatus?.let { Text(it, fontSize = 12.sp, color = Hint) }
         Text(if (guidanceActive) "실제 주행 안내 중에는 소리 테스트를 사용할 수 없습니다."
             else "차량 연결 없이 테스트할 수 있습니다. 소리가 안 들리면 휴대폰 미디어 음량과 출력 기기를 확인해 주세요.",
             fontSize = 12.sp, color = Hint)

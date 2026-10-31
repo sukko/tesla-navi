@@ -1,39 +1,7 @@
-Tesla Navi - third-party notices for bundled binaries
+Tesla Navi - third-party notices
 
-sherpa-onnx 1.12.34
-https://github.com/k2-fsa/sherpa-onnx
-Licensed under the Apache License, Version 2.0. The full license text is in TESLA-LICENSE.txt in these assets.
+Tesla vehicle-command protocol: Apache License, Version 2.0.
+The full license text is in TESLA-LICENSE.txt in these assets.
 
-Apache Commons Compress 1.27.1
-https://commons.apache.org/proper/commons-compress/
-Licensed under the Apache License, Version 2.0. The full license text is in TESLA-LICENSE.txt in these assets.
-This product includes software developed at The Apache Software Foundation (https://www.apache.org/).
-
-ONNX Runtime (bundled in sherpa-onnx as libonnxruntime.so)
-https://github.com/microsoft/onnxruntime
-
-MIT License
-
-Copyright (c) Microsoft Corporation
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-
-Supertonic 2 voice model (downloaded on request, not included in the APK)
-https://huggingface.co/Supertone/supertonic-2
-Model weights: OpenRAIL-M License. Sample code: MIT License, Copyright (c) 2025 Supertone Inc.
+Kakao Navigation SDK: use is subject to Kakao Mobility terms.
+https://developers.kakaomobility.com/guide/android/start.html

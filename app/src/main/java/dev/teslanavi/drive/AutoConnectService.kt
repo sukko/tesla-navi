@@ -80,13 +80,15 @@ class AutoConnectService : Service() {
                     // Repair missed ACL/profile events, including an already-connected device after restart.
                     if (bluetooth) app.bluetoothStart.refresh()
                     emit(Triple(permissions, bluetooth, location))
-                    delay(10_000)
+                    delay(30_000) // Broadcasts handle normal changes immediately; this repairs missed events.
                 }
             }.distinctUntilChanged()
             combine(app.vehicles.vehicles, app.autoConnect.verified, app.autoConnect.enabled, radio) { profiles, verified, enabled, ready ->
                 MonitorTarget(profiles.map { it.vin }.toSet(), verified, enabled, ready.first, ready.second, ready.third)
             }.combine(app.bluetoothStart.state) { target, bluetooth ->
                 target.copy(triggerAllowed = bluetooth.allowed, triggerName = bluetooth.selectedNames.takeIf { it.isNotEmpty() })
+            }.combine(app.drive.state) { target, drive ->
+                target.copy(vehicleActive = drive.active)
             }.distinctUntilChanged().collectLatest { target ->
                 app.autoConnect.proximity.update(target.registered, target.verified)
                 when {
@@ -94,6 +96,7 @@ class AutoConnectService : Service() {
                     !target.permissions -> app.autoConnect.report("자동 연결 권한을 확인해 주세요")
                     !target.bluetooth -> app.autoConnect.report("Bluetooth를 켜면 자동 연결을 다시 시작합니다")
                     !target.location -> app.autoConnect.report("휴대폰 위치 기능을 켜면 자동 연결을 다시 시작합니다")
+                    target.vehicleActive -> app.autoConnect.report("차량 연결 중 · 추가 차량 검색 대기")
                     !target.triggerAllowed -> {
                         app.drive.recordAutomaticStart("선택 기기 연결 대기")
                         app.autoConnect.report("${target.triggerName ?: "선택한 블루투스 기기"} 연결 대기 · 연결되면 차량을 검색합니다")
@@ -137,7 +140,7 @@ class AutoConnectService : Service() {
     override fun onDestroy() { running = false; scope.cancel(); super.onDestroy() }
     override fun onBind(intent: Intent?): IBinder? = null
 
-    private data class MonitorTarget(val registered: Set<String>, val verified: Set<String>, val enabled: Boolean, val permissions: Boolean, val bluetooth: Boolean, val location: Boolean, val triggerAllowed: Boolean = true, val triggerName: String? = null)
+    private data class MonitorTarget(val registered: Set<String>, val verified: Set<String>, val enabled: Boolean, val permissions: Boolean, val bluetooth: Boolean, val location: Boolean, val triggerAllowed: Boolean = true, val triggerName: String? = null, val vehicleActive: Boolean = false)
 
     companion object {
         @Volatile var running = false

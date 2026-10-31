@@ -32,10 +32,12 @@ sealed interface NavigationEvent {
 }
 
 interface CameraNavigationEngine {
+    val needsInitialization: Boolean get() = false
     val events: Flow<NavigationUpdate>
     val revision: Long
     suspend fun initialize(nativeKey: String)
     suspend fun guide(destination: NavigationDestination)
+    fun prepareGuidance() = Unit
     fun pause()
     fun updateVehicleFix(fix: VehicleGuidanceFix?) = Unit
 }
@@ -105,7 +107,7 @@ class CameraAlertPolicy {
 
     private fun text(camera: CameraReading, meters: Int): String {
         val distance = if (meters < 50) "잠시 후" else "${((meters + 50) / 100) * 100}미터 앞"
-        val limit = camera.speedLimitKph?.let { " 제한속도 시속 ${it}킬로미터입니다." } ?: ""
+        val limit = camera.speedLimitKph?.takeIf { it > 0 }?.let { " 제한속도 시속 ${it}킬로미터입니다." } ?: ""
         val variable = if (camera.variableLimit) " 가변 제한속도 표지판을 확인해 주세요." else ""
         return "$distance ${camera.kind.label} 카메라가 있습니다.$limit$variable"
     }

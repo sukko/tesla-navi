@@ -30,13 +30,40 @@ class GuidanceSettingsTest {
     }
     @Test fun voiceChoiceSurvivesReloadAndResetButUnknownValuesFallBackToSystem() {
         val settings = GuidanceSettings(context)
-        settings.voice(GuidanceVoice.SUPERTONIC); settings.volume(40)
-        assertEquals(GuidanceVoice.SUPERTONIC, GuidanceSettings(context).options.value.voice)
+        settings.voice(GuidanceVoice.GEMINI); settings.volume(40)
+        assertEquals(GuidanceVoice.GEMINI, GuidanceSettings(context).options.value.voice)
         settings.reset()
-        assertEquals(GuidanceOptions(voice = GuidanceVoice.SUPERTONIC), GuidanceSettings(context).options.value)
+        assertEquals(GuidanceOptions(voice = GuidanceVoice.GEMINI), GuidanceSettings(context).options.value)
+        settings.voice(GuidanceVoice.GEMINI)
+        assertEquals(GuidanceVoice.GEMINI, GuidanceSettings(context).options.value.voice)
         context.getSharedPreferences("guidance-settings", Context.MODE_PRIVATE).edit().putString("voice", "REMOVED_ENGINE").commit()
         assertEquals(GuidanceVoice.SYSTEM, GuidanceSettings(context).options.value.voice)
     }
+    @Test fun retiredVoiceMigratesWithoutChangingDistancesVolumeOrExplicitSystemChoice() {
+        val prefs = context.getSharedPreferences("guidance-settings", Context.MODE_PRIVATE)
+        prefs.edit().putString("voice", "SUPERTONIC").putString("supertonic-speaker", "F3")
+            .putInt("volume", 70).putInt("highway", 900).commit()
+        val settings = GuidanceSettings(context)
+        settings.migrateRemovedVoice(true)
+        assertEquals(GuidanceOptions(volumePercent = 70, highwayMeters = 900, voice = GuidanceVoice.GEMINI), settings.options.value)
+        assertFalse(prefs.contains("supertonic-speaker"))
+        settings.voice(GuidanceVoice.SYSTEM)
+        settings.migrateRemovedVoice(true)
+        assertEquals(GuidanceVoice.SYSTEM, settings.options.value.voice)
+        prefs.edit().putString("voice", "SUPERTONIC").commit()
+        val noKey = GuidanceSettings(context)
+        noKey.migrateRemovedVoice(false)
+        assertEquals(GuidanceVoice.SYSTEM, noKey.options.value.voice)
+    }
+
+    @Test fun playbackSpeedIsBoundedAndInvalidVoiceFallsBack() {
+        val settings = GuidanceSettings(context)
+        settings.geminiSpeed(Int.MAX_VALUE)
+        assertEquals(150, GuidanceSettings(context).options.value.geminiSpeedPercent)
+        settings.geminiSpeed(-30)
+        assertEquals(80, GuidanceSettings(context).options.value.geminiSpeedPercent)
+    }
+
     @Test fun configuredRangesControlBothCameraPresenceAndOverspeed() {
         val options = GuidanceOptions(highwayMeters = 1200, generalMeters = 600)
         val camera = CameraReading("a", CameraKind.SPEED, 60, 1000)
@@ -50,16 +77,17 @@ class GuidanceSettingsTest {
         assertFalse(speed.isOverSpeed(camera.copy(distanceMeters = 1201), 65.0, RoadClass.UNKNOWN, options))
     }
 
-    @Test fun supertonicSpeakerSurvivesRestartResetAndSwitchingToSystem() {
+    @Test fun geminiPreferencesSurviveRestartResetAndSwitchingToSystem() {
         val settings = GuidanceSettings(context)
-        settings.supertonicSpeaker(SupertonicSpeaker.F3)
-        settings.voice(GuidanceVoice.SUPERTONIC)
+        settings.geminiSpeaker(GeminiSpeaker.Aoede); settings.geminiSpeed(135)
+        settings.voice(GuidanceVoice.GEMINI)
         settings.reset()
-        assertEquals(SupertonicSpeaker.F3, GuidanceSettings(context).options.value.supertonicSpeaker)
+        assertEquals(GeminiSpeaker.Aoede, GuidanceSettings(context).options.value.geminiSpeaker)
+        assertEquals(135, GuidanceSettings(context).options.value.geminiSpeedPercent)
         settings.voice(GuidanceVoice.SYSTEM)
-        assertEquals(SupertonicSpeaker.F3, GuidanceSettings(context).options.value.supertonicSpeaker)
+        assertEquals(GeminiSpeaker.Aoede, GuidanceSettings(context).options.value.geminiSpeaker)
         context.getSharedPreferences("guidance-settings", Context.MODE_PRIVATE).edit()
-            .putString("supertonic-speaker", "UNKNOWN").commit()
-        assertEquals(SupertonicSpeaker.F1, GuidanceSettings(context).options.value.supertonicSpeaker)
+            .putString("gemini-speaker", "UNKNOWN").commit()
+        assertEquals(GeminiSpeaker.Kore, GuidanceSettings(context).options.value.geminiSpeaker)
     }
 }

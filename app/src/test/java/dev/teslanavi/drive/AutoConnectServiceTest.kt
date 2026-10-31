@@ -4,6 +4,11 @@ import android.Manifest
 import android.app.Notification
 import android.app.Service
 import android.content.Intent
+import android.bluetooth.BluetoothManager
+import android.location.LocationManager
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.test.*
 import androidx.test.core.app.ApplicationProvider
 import dev.teslanavi.TeslaNaviApp
 import dev.teslanavi.protocol.VehicleIdentity
@@ -14,10 +19,36 @@ import org.robolectric.Robolectric
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
+import org.robolectric.shadow.api.Shadow
+import org.robolectric.shadows.ShadowBluetoothLeScanner
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34], application = TeslaNaviApp::class)
 class AutoConnectServiceTest {
+    @OptIn(ExperimentalCoroutinesApi::class)
+    @Test fun activeVehicleStopsExtraScanningAndEndingSessionResumesWaitingScan() = runTest {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        val controller = Robolectric.buildService(AutoConnectService::class.java).create()
+        try {
+            shadowOf(app).grantPermissions(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION,
+                Manifest.permission.ACCESS_BACKGROUND_LOCATION, Manifest.permission.BLUETOOTH_SCAN,
+                Manifest.permission.BLUETOOTH_CONNECT, Manifest.permission.POST_NOTIFICATIONS)
+            val adapter = app.getSystemService(BluetoothManager::class.java).adapter
+            shadowOf(adapter).setEnabled(true)
+            shadowOf(app.getSystemService(LocationManager::class.java)).setLocationEnabled(true)
+            val vin = "5YJYGDEE1NF123456"
+            app.vehicles.add("Model Y", vin); app.autoConnect.verified(vin); app.autoConnect.setEnabled(true)
+            controller.get().onStartCommand(null, 0, 1); runCurrent()
+            val scanner = Shadow.extract<ShadowBluetoothLeScanner>(adapter.bluetoothLeScanner)
+            assertEquals(1, scanner.activeScans.size)
+            app.drive.prepare(vin, automatic = true); runCurrent()
+            assertTrue(scanner.activeScans.isEmpty())
+            app.drive.clear(); runCurrent()
+            assertEquals(1, scanner.activeScans.size)
+        } finally {
+            controller.destroy(); runCurrent(); Dispatchers.resetMain()
+        }
+    }
     private val app get() = ApplicationProvider.getApplicationContext<TeslaNaviApp>()
 
     @Test fun automaticWaitingRunsAsVisibleForegroundServiceAndCanBeDisabled() {
