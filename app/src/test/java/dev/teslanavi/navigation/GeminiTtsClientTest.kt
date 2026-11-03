@@ -47,24 +47,29 @@ class GeminiTtsClientTest {
     }
 
     @Test fun previewModelUsesLegacyRequestAndDecodesRawMonoPcm() {
-        val bytes = ByteArray(4800) { if (it % 2 == 0) 10 else 0 }
-        val connection = FakeGeminiConnection(response = legacyResponse(bytes))
-        val pcm = GeminiTtsClient { connection }.synthesize("test-key", "삼백 미터 앞", GeminiSpeaker.Zephyr, GeminiTtsModel.FALLBACK)
-        val request = JSONObject(connection.body.toString("UTF-8"))
-        assertFalse(request.has("input"))
-        assertTrue(request.getJSONArray("contents").getJSONObject(0).getJSONArray("parts").getJSONObject(0)
-            .getString("text").endsWith("안내 문장:\n삼백 미터 앞"))
-        assertEquals("AUDIO", request.getJSONObject("generationConfig").getJSONArray("responseModalities").getString(0))
-        assertEquals("Zephyr", request.getJSONObject("generationConfig").getJSONObject("speechConfig")
-            .getJSONObject("voiceConfig").getJSONObject("prebuiltVoiceConfig").getString("voiceName"))
-        assertTrue(GeminiTtsClient.endpoint(GeminiTtsModel.FALLBACK).endsWith("models/gemini-3.1-flash-tts-preview:generateContent"))
-        assertArrayEquals(bytes, pcm.bytes)
-        assertEquals(24_000, pcm.sampleRate)
-        val invalidResponses = listOf(legacyResponse(ByteArray(4800)), legacyResponse(bytes).replace("STOP", "SAFETY"),
-            legacyResponse(bytes, "audio/mp3"), legacyResponse(bytes, "audio/L16;rate=0"),
-            legacyResponse(byteArrayOf(1, 2, 3)))
-        for ((index, invalid) in invalidResponses.withIndex()) {
-            assertTrue("invalid legacy case $index", runCatching { GeminiTtsClient().decodeResponse(invalid, GeminiTtsModel.FALLBACK) }.isFailure)
+        for (model in listOf(GeminiTtsModel.FALLBACK, GeminiTtsModel.FLASH25)) {
+            val bytes = ByteArray(4800) { if (it % 2 == 0) 10 else 0 }
+            val connection = FakeGeminiConnection(response = legacyResponse(bytes))
+            var connectedModel: GeminiTtsModel? = null
+            val pcm = GeminiTtsClient { selected -> connectedModel = selected; connection }
+                .synthesize("test-key", "삼백 미터 앞", GeminiSpeaker.Zephyr, model)
+            assertEquals(model, connectedModel)
+            val request = JSONObject(connection.body.toString("UTF-8"))
+            assertFalse(request.has("input"))
+            assertTrue(request.getJSONArray("contents").getJSONObject(0).getJSONArray("parts").getJSONObject(0)
+                .getString("text").endsWith("안내 문장:\n삼백 미터 앞"))
+            assertEquals("AUDIO", request.getJSONObject("generationConfig").getJSONArray("responseModalities").getString(0))
+            assertEquals("Zephyr", request.getJSONObject("generationConfig").getJSONObject("speechConfig")
+                .getJSONObject("voiceConfig").getJSONObject("prebuiltVoiceConfig").getString("voiceName"))
+            assertEquals("https://generativelanguage.googleapis.com/v1beta/models/${model.id}:generateContent", GeminiTtsClient.endpoint(model))
+            assertArrayEquals(bytes, pcm.bytes)
+            assertEquals(24_000, pcm.sampleRate)
+            val invalidResponses = listOf(legacyResponse(ByteArray(4800)), legacyResponse(bytes).replace("STOP", "SAFETY"),
+                legacyResponse(bytes, "audio/mp3"), legacyResponse(bytes, "audio/L16;rate=0"),
+                legacyResponse(byteArrayOf(1, 2, 3)))
+            for ((index, invalid) in invalidResponses.withIndex()) {
+                assertTrue("invalid legacy case $model $index", runCatching { GeminiTtsClient().decodeResponse(invalid, model) }.isFailure)
+            }
         }
     }
 

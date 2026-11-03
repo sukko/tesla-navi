@@ -21,6 +21,40 @@ import java.io.File
 @Config(sdk = [34], application = TeslaNaviApp::class)
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
 class VehicleScreenTest {
+    @Config(qualifiers = "w384dp-h832dp-xxhdpi")
+    @Test fun positionStatusFollowsPhoneVehicleWaitingRecoveryAndParkingWithoutKeepingStaleSource() {
+        val app = ApplicationProvider.getApplicationContext<TeslaNaviApp>()
+        val cameraState = org.robolectric.util.ReflectionHelpers.getField<kotlinx.coroutines.flow.MutableStateFlow<dev.teslanavi.navigation.CameraState>>(app.cameras, "_state")
+        val guiding = dev.teslanavi.navigation.CameraState(phase = dev.teslanavi.navigation.CameraPhase.GUIDING,
+            mode = dev.teslanavi.navigation.NavigationMode.ROUTE, vehicleAvailable = true, locationAtMillis = 1000)
+        compose.runOnIdle { app.features.setSettingsTab(true); cameraState.value = guiding }
+        compose.onNodeWithText("휴대폰 GPS 안내 중").performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText("차량 위치로 보조 안내 중").assertDoesNotExist()
+        val vehicle = guiding.copy(positionSource = dev.teslanavi.navigation.PositionSource.VEHICLE,
+            cameras = listOf(dev.teslanavi.navigation.CameraReading("sample", dev.teslanavi.navigation.CameraKind.SPEED, 60, 423)))
+        compose.runOnIdle { cameraState.value = vehicle }
+        compose.onNodeWithText("차량 위치로 보조 안내 중").performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText("휴대폰 GPS 안내 중").assertDoesNotExist()
+        saveScreenshot("vehicle-position-status")
+        compose.runOnIdle { cameraState.value = vehicle.copy(phase = dev.teslanavi.navigation.CameraPhase.WAITING_GPS, cameras = emptyList()) }
+        compose.onNodeWithText("위치 수신 대기").performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText("차량 위치로 보조 안내 중").assertDoesNotExist()
+        // A BLE loss can precede the next SDK frame; the retained vehicle source must not claim active assistance.
+        compose.runOnIdle { cameraState.value = vehicle.copy(vehicleAvailable = false, phoneFallback = true) }
+        compose.onNodeWithText("위치 수신 대기").assertExists()
+        compose.onNodeWithText("차량 위치로 보조 안내 중").assertDoesNotExist()
+        compose.runOnIdle { cameraState.value = vehicle.copy(locationAtMillis = null) }
+        compose.onNodeWithText("위치 수신 대기").assertExists()
+        compose.onNodeWithText("차량 위치로 보조 안내 중").assertDoesNotExist()
+        compose.runOnIdle { cameraState.value = guiding.copy(phoneFallback = true, vehicleAvailable = false) }
+        compose.onNodeWithText("휴대폰 GPS 안내 중").assertExists()
+        compose.onNodeWithText("차량 연결 끊김 · 휴대폰 GPS로 마지막 목적지의 카메라를 안내합니다.").assertExists()
+        compose.runOnIdle { cameraState.value = vehicle.copy(phase = dev.teslanavi.navigation.CameraPhase.WAITING_DRIVE) }
+        compose.onNodeWithText("차량 위치로 보조 안내 중").assertDoesNotExist()
+        compose.onNodeWithText("휴대폰 GPS 안내 중").assertDoesNotExist()
+        compose.onNodeWithText("위치 수신 대기").assertDoesNotExist()
+    }
+
     @Test fun settingsTabKeepsMultipleBluetoothSelectionAvailable() {
         val app = ApplicationProvider.getApplicationContext<TeslaNaviApp>()
         org.robolectric.Shadows.shadowOf(app).grantPermissions(android.Manifest.permission.BLUETOOTH_CONNECT)

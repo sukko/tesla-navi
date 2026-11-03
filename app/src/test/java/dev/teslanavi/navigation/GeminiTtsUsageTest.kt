@@ -19,36 +19,42 @@ class GeminiTtsUsageTest {
         .getSharedPreferences("quota-test", Context.MODE_PRIVATE)
     private var now = Instant.parse("2026-11-03T01:00:00Z").toEpochMilli()
 
-    @Test fun minuteHeadroomCascadesThroughAllThreeAndLastModelWaitsForRollingMinute() {
+    @Test fun minuteHeadroomCascadesThroughAllFourAndLastModelWaitsForRollingMinute() {
         val usage = GeminiTtsUsage(prefs) { now }
-        val models = (1..7).map { checkNotNull(usage.acquire()).model }
+        val models = (1..9).map { checkNotNull(usage.acquire()).model }
         assertEquals(listOf(GeminiTtsModel.PRIMARY, GeminiTtsModel.PRIMARY,
             GeminiTtsModel.FALLBACK, GeminiTtsModel.FALLBACK,
-            GeminiTtsModel.FLASH, GeminiTtsModel.FLASH, GeminiTtsModel.FLASH), models)
+            GeminiTtsModel.FLASH, GeminiTtsModel.FLASH,
+            GeminiTtsModel.FLASH25, GeminiTtsModel.FLASH25, GeminiTtsModel.FLASH25), models)
         assertNull(usage.acquire())
         now += 59_999
         assertNull(usage.acquire())
         now++
-        assertEquals(GeminiTtsModel.FLASH, usage.acquire()?.model)
-        assertEquals(1, usage.state.value.flash.rpm)
-        assertEquals(4, usage.state.value.flash.rpd)
+        assertEquals(GeminiTtsModel.FLASH25, usage.acquire()?.model)
+        assertEquals(1, usage.state.value.flash25.rpm)
+        assertEquals(4, usage.state.value.flash25.rpd)
     }
 
     @Test fun dailyHeadroomAndFinalDailyLimitPersistAcrossRestarts() {
-        val usage = GeminiTtsUsage(prefs) { now }
+        var usage = GeminiTtsUsage(prefs) { now }
         for (model in GeminiTtsModel.entries) {
-            val allowed = if (model == GeminiTtsModel.FLASH) 10 else 8
-            repeat(allowed) {
+            val allowed = if (model == GeminiTtsModel.FLASH25) 10 else 9
+            repeat(allowed) { index ->
                 assertEquals(model, usage.acquire()?.model)
                 now += 60_001 // Exercise RPD independently of RPM.
+                if (index == 7 && model != GeminiTtsModel.FLASH25) {
+                    usage = GeminiTtsUsage(prefs) { now }
+                    assertEquals("Eight requests must still allow the ninth after restart", model, usage.state.value.model)
+                }
             }
         }
         assertNull(usage.acquire())
         val reloaded = GeminiTtsUsage(prefs) { now }
-        assertEquals(GeminiTtsModel.FLASH, reloaded.state.value.model)
-        assertEquals(8, reloaded.state.value.primary.rpd)
-        assertEquals(8, reloaded.state.value.fallback.rpd)
-        assertEquals(10, reloaded.state.value.flash.rpd)
+        assertEquals(GeminiTtsModel.FLASH25, reloaded.state.value.model)
+        assertEquals(9, reloaded.state.value.primary.rpd)
+        assertEquals(9, reloaded.state.value.fallback.rpd)
+        assertEquals(9, reloaded.state.value.flash.rpd)
+        assertEquals(10, reloaded.state.value.flash25.rpd)
         assertNull(reloaded.acquire())
     }
 
@@ -97,17 +103,17 @@ class GeminiTtsUsageTest {
 
     @Test fun serverDailyRejectionPersistsAndLateYesterdayResponseCannotBlockNewDay() {
         val usage = GeminiTtsUsage(prefs) { now }
-        val primary = checkNotNull(usage.acquire())
-        usage.rejected(primary, daily = true, retryMillis = 1000)
-        assertEquals(GeminiTtsModel.FALLBACK, GeminiTtsUsage(prefs) { now }.state.value.model)
-        val second = checkNotNull(usage.acquire())
-        usage.rejected(second, daily = true, retryMillis = 1000)
-        val third = checkNotNull(usage.acquire())
-        usage.rejected(third, daily = true, retryMillis = 1000)
+        var primary: GeminiTtsUsage.Ticket? = null
+        for (model in GeminiTtsModel.entries) {
+            val ticket = checkNotNull(usage.acquire())
+            assertEquals(model, ticket.model)
+            if (primary == null) primary = ticket
+            usage.rejected(ticket, daily = true, retryMillis = 1000)
+        }
         now += 120_000
         assertNull(GeminiTtsUsage(prefs) { now }.acquire())
         now = usage.state.value.resetsAt
-        usage.rejected(primary, daily = true, retryMillis = 1000)
+        usage.rejected(checkNotNull(primary), daily = true, retryMillis = 1000)
         assertEquals(GeminiTtsModel.PRIMARY, usage.acquire()?.model)
     }
 
@@ -116,8 +122,9 @@ class GeminiTtsUsageTest {
         val pool = Executors.newFixedThreadPool(4)
         try {
             val admitted = pool.invokeAll((1..20).map { Callable { usage.acquire() } }).mapNotNull { it.get() }
-            assertEquals(7, admitted.size)
-            assertEquals(mapOf(GeminiTtsModel.PRIMARY to 2, GeminiTtsModel.FALLBACK to 2, GeminiTtsModel.FLASH to 3),
+            assertEquals(9, admitted.size)
+            assertEquals(mapOf(GeminiTtsModel.PRIMARY to 2, GeminiTtsModel.FALLBACK to 2,
+                GeminiTtsModel.FLASH to 2, GeminiTtsModel.FLASH25 to 3),
                 admitted.groupingBy { it.model }.eachCount())
         } finally { pool.shutdownNow() }
     }
@@ -144,5 +151,24 @@ class GeminiTtsUsageTest {
         assertNull(usage.acquire())
         now = usage.state.value.resetsAt
         assertEquals(GeminiTtsModel.PRIMARY, usage.acquire()?.model)
+    }
+
+    @Test fun existingThreeModelLedgerKeepsCountsAndAdvancesToNewLastModel() {
+        val saved = org.json.JSONObject().put("day", GeminiTtsUsage.date(now)).put("selectedIndex", 2)
+        saved.put("PRIMARY", org.json.JSONObject().put("daily", 9))
+        saved.put("FALLBACK", org.json.JSONObject().put("daily", 9))
+        saved.put("FLASH", org.json.JSONObject().put("daily", 10))
+        prefs.edit().putString("usage", saved.toString()).commit()
+        val usage = GeminiTtsUsage(prefs) { now }
+        assertEquals(9, usage.state.value.primary.rpd)
+        assertEquals(9, usage.state.value.fallback.rpd)
+        assertEquals(10, usage.state.value.flash.rpd)
+        assertEquals(0, usage.state.value.flash25.rpd)
+        assertEquals(GeminiTtsModel.FLASH25, usage.acquire()?.model)
+        assertEquals(1, GeminiTtsUsage(prefs) { now }.state.value.flash25.rpd)
+        now = usage.state.value.resetsAt
+        usage.refresh()
+        assertEquals(GeminiTtsModel.PRIMARY, usage.state.value.model)
+        assertEquals(0, usage.state.value.flash25.rpd)
     }
 }

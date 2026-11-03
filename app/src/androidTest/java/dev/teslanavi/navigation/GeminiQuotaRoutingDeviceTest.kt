@@ -21,7 +21,7 @@ class GeminiQuotaRoutingDeviceTest {
         val app = InstrumentationRegistry.getInstrumentation().targetContext.applicationContext as TeslaNaviApp
         assumeTrue(app.geminiSettings.state.value.hasKey)
         assumeTrue(!app.drive.state.value.active && !DriveService.busy && !app.cameras.state.value.phoneFallback)
-        fun counts() = app.geminiUsage.state.value.let { listOf(it.primary.rpd, it.fallback.rpd, it.flash.rpd) }
+        fun counts() = app.geminiUsage.state.value.let { listOf(it.primary.rpd, it.fallback.rpd, it.flash.rpd, it.flash25.rpd) }
         val before = counts()
         val output = withContext(Dispatchers.Main) {
             AndroidCameraSpeaker(app, app.gemini.preview,
@@ -40,7 +40,7 @@ class GeminiQuotaRoutingDeviceTest {
             assertTrue(withTimeout(45_000) { done.await() })
             val after = counts()
             assertTrue(after.zip(before).all { (a, b) -> a - b in 0..1 })
-            assertEquals(after, GeminiTtsUsage(app).state.value.let { listOf(it.primary.rpd, it.fallback.rpd, it.flash.rpd) })
+            assertEquals(after, GeminiTtsUsage(app).state.value.let { listOf(it.primary.rpd, it.fallback.rpd, it.flash.rpd, it.flash25.rpd) })
             android.util.Log.i("TeslaNaviAudio", "Gemini quota device counts=$after model=${app.geminiUsage.state.value.model.id}")
         } finally { withContext(Dispatchers.Main) { output.close() } }
     }

@@ -663,6 +663,7 @@ private fun CameraCard(state: CameraState, hasKey: Boolean, onMute: (Boolean) ->
             Text("단속카메라 안내", fontWeight = FontWeight.SemiBold)
             if (hasKey) TextButton(onClick = { onMute(!state.muted) }) { Text(if (state.muted) "음성 켜기" else "음소거") }
         }
+        CameraPositionStatus(state)
         if (state.phase == CameraPhase.INITIALIZING) LinearProgressIndicator(Modifier.fillMaxWidth(), color = Mint)
         if (state.overSpeed) Text("과속 경고 · 제한속도보다 5 km/h 이상 빠릅니다", color = MaterialTheme.colorScheme.error,
             fontWeight = FontWeight.Bold)
@@ -690,11 +691,7 @@ private fun CameraCard(state: CameraState, hasKey: Boolean, onMute: (Boolean) ->
             else -> state.message
         }, fontSize = 17.sp, color = Muted)
         if (state.phoneFallback) {
-            Text("차량 연결 끊김 · 마지막 목적지와 휴대폰 GPS로 안내 중", color = Mint, fontSize = 12.sp)
             OutlinedButton(onClick = onStop, modifier = Modifier.fillMaxWidth()) { Text("안내 종료") }
-        }
-        if (state.phase == CameraPhase.GUIDING && state.positionSource == dev.teslanavi.navigation.PositionSource.VEHICLE) {
-            Text("휴대폰 GPS 수신 대기 · 차량 위치로 보조 안내 중", color = Mint, fontSize = 12.sp)
         }
         state.mode?.let {
             Text(if (it == NavigationMode.ROUTE) "카카오 경로 기준 · 테슬라 경로와 다를 수 있습니다" else "현재 주행 도로 기준 · 안전운행 모드", color = Muted, fontSize = 11.sp)

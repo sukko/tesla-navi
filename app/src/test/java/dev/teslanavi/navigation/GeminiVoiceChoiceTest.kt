@@ -59,22 +59,25 @@ class GeminiVoiceChoiceTest {
         }
     }
 
-    @Test fun showsPersistedCountsAndTheThirdSynthesisModelWithoutCloudRequests() {
+    @Test fun showsPersistedCountsAndTheFourthSynthesisModelWithoutCloudRequests() {
         val app = ApplicationProvider.getApplicationContext<TeslaNaviApp>()
         compose.runOnIdle {
             app.features.setSettingsTab(true)
             val state = org.robolectric.util.ReflectionHelpers.getField<kotlinx.coroutines.flow.MutableStateFlow<GeminiKeyState>>(app.geminiSettings, "mutable")
             state.value = GeminiKeyState(hasKey = true)
-            repeat(4) { assertNotNull(app.geminiUsage.acquire()) }
+            repeat(6) { assertNotNull(app.geminiUsage.acquire()) }
         }
         compose.onNodeWithContentDescription("설정").performClick()
         compose.onNodeWithText("안내 설정").performScrollTo().performClick()
         compose.onNodeWithText("Gemini 사용량 · 앱에서 집계").performScrollTo().assertIsDisplayed()
-        compose.onNodeWithText("새 음성 생성: 3.8 Flash TTS").performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText("자동 전환: 3.8 Flash-Lite TTS → 3.1 Flash TTS → 3.8 Flash TTS → 2.5 Flash TTS").performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText("새 음성 생성: 2.5 Flash TTS").performScrollTo().assertIsDisplayed()
         compose.onNodeWithText("3.1 Flash TTS\n최근 1분 2/3회 · 하루 2/10회").performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText("2.5 Flash TTS\n최근 1분 0/3회 · 하루 0/10회").performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText("앞의 세 모델은 분당 2회·하루 9회부터 다음 모델로 전환합니다. 캐시 재생은 제외하며, 다른 앱·AI Studio의 사용량은 포함하지 않습니다.").performScrollTo().assertIsDisplayed()
         compose.runOnIdle {
             assertEquals(2, GeminiTtsUsage(app).state.value.primary.rpd)
-            assertEquals(GeminiTtsModel.FLASH, GeminiTtsUsage(app).state.value.model)
+            assertEquals(GeminiTtsModel.FLASH25, GeminiTtsUsage(app).state.value.model)
         }
     }
 

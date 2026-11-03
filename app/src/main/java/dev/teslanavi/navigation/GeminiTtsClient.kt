@@ -51,7 +51,7 @@ class GeminiTtsClient(private val connect: (GeminiTtsModel) -> HttpURLConnection
     }
 
     private fun request(text: String, speaker: GeminiSpeaker, model: GeminiTtsModel): JSONObject {
-        if (model == GeminiTtsModel.FALLBACK) {
+        if (model.usesGenerateContent) {
             val prompt = "다음 안내 문장만 또렷한 한국어 내비게이션 음성으로 읽으세요. 긴 침묵 없이 일정한 보통 속도로 읽으세요.\n안내 문장:\n$text"
             return JSONObject().put("contents", JSONArray().put(JSONObject().put("parts",
                 JSONArray().put(JSONObject().put("text", prompt)))))
@@ -94,7 +94,7 @@ class GeminiTtsClient(private val connect: (GeminiTtsModel) -> HttpURLConnection
 
     internal fun decodeResponse(json: String, model: GeminiTtsModel = GeminiTtsModel.PRIMARY): Pcm {
         val response = JSONObject(json)
-        if (model == GeminiTtsModel.FALLBACK) return decodeLegacy(response)
+        if (model.usesGenerateContent) return decodeLegacy(response)
         require(response.optString("status", "completed") == "completed") { "Gemini 음성 생성 미완료" }
         val steps = response.getJSONArray("steps")
         var audio: String? = null
@@ -141,7 +141,7 @@ class GeminiTtsClient(private val connect: (GeminiTtsModel) -> HttpURLConnection
     companion object {
         const val MODEL = "gemini-3.8-flash-lite-tts"
         const val ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/interactions"
-        fun endpoint(model: GeminiTtsModel) = if (model != GeminiTtsModel.FALLBACK) ENDPOINT
+        fun endpoint(model: GeminiTtsModel) = if (!model.usesGenerateContent) ENDPOINT
             else "https://generativelanguage.googleapis.com/v1beta/models/${model.id}:generateContent"
     }
 }

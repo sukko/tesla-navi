@@ -9,10 +9,11 @@ import org.json.JSONObject
 import java.time.Instant
 import java.time.ZoneId
 
-enum class GeminiTtsModel(val id: String, val label: String) {
+enum class GeminiTtsModel(val id: String, val label: String, val usesGenerateContent: Boolean = false) {
     PRIMARY("gemini-3.8-flash-lite-tts", "3.8 Flash-Lite TTS"),
-    FALLBACK("gemini-3.1-flash-tts-preview", "3.1 Flash TTS"),
-    FLASH("gemini-3.8-flash-tts", "3.8 Flash TTS")
+    FALLBACK("gemini-3.1-flash-tts-preview", "3.1 Flash TTS", true),
+    FLASH("gemini-3.8-flash-tts", "3.8 Flash TTS"),
+    FLASH25("gemini-2.5-flash-preview-tts", "2.5 Flash TTS", true)
 }
 
 data class GeminiModelUsage(val rpm: Int = 0, val rpd: Int = 0)
@@ -21,6 +22,7 @@ data class GeminiUsageState(
     val primary: GeminiModelUsage = GeminiModelUsage(),
     val fallback: GeminiModelUsage = GeminiModelUsage(),
     val flash: GeminiModelUsage = GeminiModelUsage(),
+    val flash25: GeminiModelUsage = GeminiModelUsage(),
     val resetsAt: Long = 0,
     val reason: String? = null,
     val error: String? = null,
@@ -105,7 +107,7 @@ class GeminiTtsUsage(
         if (counter.daily >= DAILY_LIMIT || counter.times.size >= MINUTE_LIMIT || now < counter.blockedUntil) return null
         counter.daily++
         counter.times += now
-        // Keep headroom on the first two models. Once advanced, stay there until the quota day resets.
+        // Keep headroom on all but the final model. Stay advanced until the quota day resets.
         advanceIfNeeded(now)
         val saved = persist() // On storage failure the caller falls back without making the network request.
         publish(now)
@@ -129,7 +131,8 @@ class GeminiTtsUsage(
     private fun publish(now: Long) {
         fun used(model: GeminiTtsModel) = counters.getValue(model).let { GeminiModelUsage(it.times.size, it.daily) }
         mutable.value = GeminiUsageState(GeminiTtsModel.entries[selectedIndex],
-            used(GeminiTtsModel.PRIMARY), used(GeminiTtsModel.FALLBACK), used(GeminiTtsModel.FLASH), nextReset(now), reason,
+            used(GeminiTtsModel.PRIMARY), used(GeminiTtsModel.FALLBACK), used(GeminiTtsModel.FLASH),
+            used(GeminiTtsModel.FLASH25), nextReset(now), reason,
             if (storageReady) null else "사용량을 저장하지 못해 새 음성 생성을 중지했습니다. 저장 공간을 확인해 주세요.")
     }
 
@@ -144,8 +147,8 @@ class GeminiTtsUsage(
     companion object {
         const val MINUTE_LIMIT = 3
         const val DAILY_LIMIT = 10
-        private const val EARLY_MINUTE = 2
-        private const val EARLY_DAILY = 8
+        const val EARLY_MINUTE = 2
+        const val EARLY_DAILY = 9
         private const val MINUTE = 60_000L
         private val PACIFIC = ZoneId.of("America/Los_Angeles")
         internal fun date(now: Long): String = Instant.ofEpochMilli(now).atZone(PACIFIC).toLocalDate().toString()

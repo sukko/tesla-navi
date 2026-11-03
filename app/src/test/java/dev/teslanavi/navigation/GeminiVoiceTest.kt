@@ -114,13 +114,14 @@ class GeminiVoiceTest {
         val ledger = GeminiTtsUsage(clock = { wall })
         val calls = java.util.Collections.synchronizedList(mutableListOf<GeminiTtsModel>())
         val voice = GeminiVoice({ "key" }, temp.newFolder(), { _, _, _, model -> calls += model; pcm }, usage = ledger)
-        for (i in 1..7) assertNotNull(render(voice, "안내 $i"))
+        for (i in 1..9) assertNotNull(render(voice, "안내 $i"))
         assertEquals(listOf(GeminiTtsModel.PRIMARY, GeminiTtsModel.PRIMARY, GeminiTtsModel.FALLBACK,
-            GeminiTtsModel.FALLBACK, GeminiTtsModel.FLASH, GeminiTtsModel.FLASH, GeminiTtsModel.FLASH), calls.toList())
+            GeminiTtsModel.FALLBACK, GeminiTtsModel.FLASH, GeminiTtsModel.FLASH,
+            GeminiTtsModel.FLASH25, GeminiTtsModel.FLASH25, GeminiTtsModel.FLASH25), calls.toList())
         assertNull(render(voice, "새 안내"))
         voice.reset()
         assertNotNull(render(voice, "안내 1")) // A cached earlier model still works after switching and quota exhaustion.
-        assertEquals(7, calls.size)
+        assertEquals(9, calls.size)
         assertNull(render(voice, "새 안내"))
         wall = ledger.state.value.resetsAt
         assertNotNull(render(voice, "다음 날 안내"))
@@ -128,21 +129,22 @@ class GeminiVoiceTest {
         assertEquals(1, ledger.state.value.primary.rpd)
         assertEquals(0, ledger.state.value.fallback.rpd)
         assertEquals(0, ledger.state.value.flash.rpd)
+        assertEquals(0, ledger.state.value.flash25.rpd)
     }
 
     @Test fun serverQuotaSwitchesWithinTheSameRequestAndCachesSuccessfulReplacement() {
         val calls = java.util.Collections.synchronizedList(mutableListOf<GeminiTtsModel>())
         val voice = GeminiVoice({ "key" }, temp.newFolder(), { _, _, _, model ->
             calls += model
-            if (model != GeminiTtsModel.FLASH) throw GeminiTtsFailure(429, "사용 한도", dailyQuota = true)
+            if (model != GeminiTtsModel.FLASH25) throw GeminiTtsFailure(429, "사용 한도", dailyQuota = true)
             pcm
         })
         assertNotNull(render(voice, "카메라 안내"))
         assertEquals(GeminiTtsModel.entries.toList(), calls.toList())
         assertNotNull(render(voice, "카메라 안내"))
-        assertEquals(3, calls.size)
+        assertEquals(4, calls.size)
         assertNull(voice.status.value)
-        assertEquals(GeminiTtsModel.FLASH, voice.usage.state.value.model)
+        assertEquals(GeminiTtsModel.FLASH25, voice.usage.state.value.model)
     }
 
     @Test fun quotaFailureRotatesModelsAndResetKeepsAccountingWhileDiscardingLateResponses() {
@@ -153,13 +155,14 @@ class GeminiVoiceTest {
         assertNull(render(voice, "안내"))
         assertEquals("사용 한도", voice.status.value)
         assertNull(render(voice, "다른 안내"))
-        assertEquals(3, calls.get())
+        assertEquals(4, calls.get())
         voice.reset()
         assertNull(render(voice, "안내"))
-        assertEquals(3, calls.get())
+        assertEquals(4, calls.get())
         assertEquals(1, voice.usage.state.value.primary.rpd)
         assertEquals(1, voice.usage.state.value.fallback.rpd)
         assertEquals(1, voice.usage.state.value.flash.rpd)
+        assertEquals(1, voice.usage.state.value.flash25.rpd)
         val gate = CountDownLatch(1)
         val entered = CountDownLatch(1)
         val delayed = GeminiVoice({ "key" }, temp.newFolder(), { _, _, _, _ -> entered.countDown(); gate.await(); pcm })
