@@ -18,11 +18,13 @@ import dev.teslanavi.TeslaNaviApp
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.collectLatest
 
 class DriveService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var session: Job? = null
     private var wakeLock: PowerManager.WakeLock? = null
+    private var stopping = false
     private val app get() = application as TeslaNaviApp
 
     override fun onCreate() {
@@ -43,10 +45,20 @@ class DriveService : Service() {
             }
             return START_NOT_STICKY
         }
-        if (intent?.action == STOP) {
-            app.autoConnect.setEnabled(false)
-            stopService(Intent(this, AutoConnectService::class.java))
+        if (intent?.action == STOP || intent?.action == IDLE_STOP) {
+            stopping = true
+            val idleStop = intent.action == IDLE_STOP
+            // Ending this trip is different from opting out of automatic connection for future trips.
+            if (app.autoConnect.enabled.value) {
+                app.drive.state.value.vin?.let { app.autoConnect.proximity.awaitDeparture(it, android.os.SystemClock.elapsedRealtime()) }
+                if (!idleStop) app.drive.recordAutomaticStart("이번 연결 종료 · 자동 연결 설정 유지 · 차량에서 멀어진 뒤 재접근 대기")
+                if (!idleStop && !AutoConnectService.running && AutoConnectSettings.ready(this)) {
+                    try { AutoConnectService.start(this) }
+                    catch (_: Exception) { app.autoConnect.report("자동 연결 설정은 유지됩니다. 앱에서 대기를 다시 시작해 주세요") }
+                }
+            }
             session?.cancel()
+            app.drive.clear()
             stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf()
             return START_NOT_STICKY
@@ -68,6 +80,7 @@ class DriveService : Service() {
                     (if (cameraEnabled) ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION else 0) else 0)
         } catch (error: Exception) { app.drive.fail(error); stopSelf(); return START_NOT_STICKY }
         busy = true
+        stopping = false
         app.drive.prepare(profile.vin, automatic)
         val enroll = intent?.getBooleanExtra("enroll", false) == true
         session = scope.launch {
@@ -94,7 +107,18 @@ class DriveService : Service() {
                         else -> drive.status
                     }
                 }.distinctUntilChanged().collect {
-                    if (!AutoConnectService.running) getSystemService(NotificationManager::class.java).notify(1, notification(it))
+                    if (!AutoConnectService.running && !stopping) getSystemService(NotificationManager::class.java).notify(1, notification(it))
+                }
+            }
+            val idleCleanup = launch {
+                val idle = SessionIdleTimeout()
+                combine(app.drive.state, app.cameras.state, app.bluetoothStart.state) { drive, cameras, bluetooth ->
+                    idle.deadline(drive, cameras, bluetooth, android.os.SystemClock.elapsedRealtime())
+                }.distinctUntilChanged().collectLatest { deadline ->
+                    if (deadline != null && !AutoConnectService.running) {
+                        delay((deadline - android.os.SystemClock.elapsedRealtime()).coerceAtLeast(0))
+                        if (!AutoConnectService.running) stopForIdle(this@DriveService)
+                    }
                 }
             }
             // Keep observing P so departure after a long stop can restart guidance.
@@ -110,7 +134,7 @@ class DriveService : Service() {
             finally {
                 withContext(NonCancellable) {
                     cameraSession.cancelAndJoin()
-                    keepAwake.cancel(); updates.cancel(); stopForeground(STOP_FOREGROUND_REMOVE); stopSelf()
+                    keepAwake.cancel(); updates.cancel(); idleCleanup.cancel(); stopForeground(STOP_FOREGROUND_REMOVE); stopSelf()
                     if (automatic && app.drive.state.value.phase == DrivePhase.ERROR && profile.vin in app.autoConnect.verified.value) {
                         app.autoConnect.report(if (app.drive.state.value.asleep) "차량 잠듦 · 깨어나면 연결합니다"
                             else "연결 대기 · 차량이 가까워지면 다시 시도합니다")
@@ -128,7 +152,7 @@ class DriveService : Service() {
         return NotificationCompat.Builder(this, CHANNEL).setSmallIcon(R.drawable.ic_notification)
             .setContentTitle("Tesla Navi · 차량 연결").setContentText(message)
             .setContentIntent(open).setOngoing(true).setOnlyAlertOnce(true)
-            .addAction(0, if (app.autoConnect.enabled.value) "연결·자동 연결 종료" else "연결 종료", stop).build()
+            .addAction(0, if (app.autoConnect.enabled.value) "이번 연결 종료" else "연결 종료", stop).build()
     }
 
     override fun onDestroy() {
@@ -148,6 +172,8 @@ class DriveService : Service() {
             context.startService(Intent(context, DriveService::class.java).setAction(OWNERSHIP))
         }
         private const val STOP = "dev.teslanavi.STOP"
+        private const val IDLE_STOP = "dev.teslanavi.IDLE_STOP"
+        internal fun stopForIdle(context: Context) { context.startService(Intent(context, DriveService::class.java).setAction(IDLE_STOP)) }
         fun start(context: Context, vin: String, enroll: Boolean, automatic: Boolean = false) {
             val intent = Intent(context, DriveService::class.java)
                 .putExtra("vin", vin).putExtra("enroll", enroll).putExtra("automatic", automatic)

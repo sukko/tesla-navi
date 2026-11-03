@@ -251,8 +251,13 @@ class MainActivity : ComponentActivity() {
         if (!AutoConnectSettings.ready(this)) { localError.value = "자동 연결 권한을 확인해 주세요."; return }
         try {
             app.autoConnect.setEnabled(true)
+            app.drive.recordAutomaticStart("사용자 요청 · 자동 연결 켜기")
             AutoConnectService.start(this)
-        } catch (_: Exception) { app.autoConnect.setEnabled(false); localError.value = "자동 연결을 시작하지 못했습니다. 다시 켜 주세요." }
+        } catch (error: Exception) {
+            app.drive.recordAutomaticStart("자동 연결 서비스 시작 실패 · ${error.javaClass.simpleName}")
+            app.autoConnect.report("자동 연결 설정은 유지됩니다. 대기를 다시 시작해 주세요")
+            localError.value = "자동 연결 대기를 시작하지 못했습니다. 권한 확인 · 대기 재시작을 눌러 주세요."
+        }
     }
 
     private fun enableBluetoothAndStart() {
@@ -570,7 +575,7 @@ private fun ConnectionCard(profiles: List<VehicleProfile>, selected: String?, st
         Text(current?.status ?: "차량을 연결해 주세요", fontSize = 19.sp, fontWeight = FontWeight.SemiBold)
         if (state.phase == DrivePhase.PAIRING) Text("키 카드를 센터 콘솔의 카드 리더에 대고 차량 화면의 안내에 따라 승인해 주세요. 최대 90초 동안 확인합니다.", color = Muted)
         if (state.active) {
-            OutlinedButton(onClick = onDisconnect, modifier = Modifier.fillMaxWidth()) { Text(if (autoEnabled) "연결 종료 · 자동 연결 끄기" else "연결 종료") }
+            OutlinedButton(onClick = onDisconnect, modifier = Modifier.fillMaxWidth()) { Text(if (autoEnabled) "이번 연결 종료" else "연결 종료") }
         } else {
             Button(onClick = { onConnect(false) }, enabled = activeProfile != null, modifier = Modifier.fillMaxWidth().height(52.dp)) { Text("차량 연결", fontWeight = FontWeight.Bold) }
             TextButton(onClick = { showEnroll = true }, enabled = activeProfile != null, modifier = Modifier.fillMaxWidth()) { Text("처음 연결하나요? 앱 키 등록") }
@@ -1179,6 +1184,10 @@ private fun GuidanceSettingsContent(app: TeslaNaviApp, guidanceActive: Boolean,
             speaker = options.geminiSpeaker, onSpeaker = app::selectGeminiSpeaker,
             speedPercent = options.geminiSpeedPercent, onSpeed = settings::geminiSpeed,
             geminiKey = geminiKey, geminiStatus = geminiStatus, onSaveGemini = app::saveGeminiKey, onDeleteGemini = app::deleteGeminiKey)
+        if (geminiKey.hasKey) {
+            Spacer(Modifier.height(12.dp))
+            GeminiUsagePanel(app.geminiUsage)
+        }
     }
     section { GuidanceSoundCheck(volume.roundToInt(), guidanceActive, app::guidancePreviewSpeaker,
         selectionKey = "${options.voice}/${options.geminiSpeaker}/${options.geminiSpeedPercent}/${geminiKey.revision}",

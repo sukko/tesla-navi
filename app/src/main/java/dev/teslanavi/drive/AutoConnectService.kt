@@ -2,6 +2,7 @@ package dev.teslanavi.drive
 
 import android.annotation.SuppressLint
 import android.app.*
+import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothManager
 import android.content.*
 import android.content.pm.ServiceInfo
@@ -17,6 +18,8 @@ import dev.teslanavi.MainActivity
 import dev.teslanavi.R
 import dev.teslanavi.TeslaNaviApp
 import kotlinx.coroutines.*
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.*
 
 /** A user-enabled, visible foreground service owns one filtered low-power [ProximityScan]. */
@@ -25,6 +28,9 @@ class AutoConnectService : Service() {
     private val app get() = application as TeslaNaviApp
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var monitor: Job? = null
+    private val refreshRadio = Channel<Unit>(Channel.CONFLATED)
+    private var quietStopping = false
+    private var preserveScanOnStop = false
 
     override fun onCreate() {
         super.onCreate()
@@ -54,9 +60,13 @@ class AutoConnectService : Service() {
             return START_NOT_STICKY
         }
         running = true
+        quietStopping = false
+        preserveScanOnStop = false
+        app.autoConnect.quiet(false)
         app.drive.recordAutomaticStart("대기 서비스 시작 완료")
         app.bluetoothStart.refresh()
         if (app.drive.state.value.active || DriveService.busy) DriveService.notificationOwnerChanged(this)
+        if (monitor?.isActive == true) refreshRadio.trySend(Unit)
         if (monitor?.isActive != true) monitor = scope.launch {
             launch {
                 combine(app.autoConnect.status, app.drive.state, app.cameras.state) { message, drive, cameras ->
@@ -67,24 +77,27 @@ class AutoConnectService : Service() {
                         else -> drive.status
                     }
                 }.distinctUntilChanged().collect { message ->
-                    getSystemService(NotificationManager::class.java).notify(NOTIFICATION, notification(message))
+                    if (!quietStopping) getSystemService(NotificationManager::class.java).notify(NOTIFICATION, notification(message))
                 }
             }
-            val radio = flow {
-                while (currentCoroutineContext().isActive) {
-                    val permissions = AutoConnectSettings.ready(this@AutoConnectService)
-                    val bluetooth = permissions && runCatching {
-                        getSystemService(BluetoothManager::class.java)?.adapter?.isEnabled == true
-                    }.getOrDefault(false)
-                    val location = LocationManagerCompat.isLocationEnabled(getSystemService(LocationManager::class.java))
-                    // Repair missed ACL/profile events, including an already-connected device after restart.
-                    if (bluetooth) app.bluetoothStart.refresh()
-                    emit(Triple(permissions, bluetooth, location))
-                    delay(30_000) // Broadcasts handle normal changes immediately; this repairs missed events.
+            launch {
+                val idle = SessionIdleTimeout()
+                combine(app.drive.state, app.cameras.state, app.bluetoothStart.state) { drive, cameras, bluetooth ->
+                    idle.deadline(drive, cameras, bluetooth, SystemClock.elapsedRealtime())
+                }.distinctUntilChanged().collectLatest { deadline ->
+                    if (deadline != null) {
+                        delay((deadline - SystemClock.elapsedRealtime()).coerceAtLeast(0))
+                        while (isActive && !quietStopping) {
+                            if (stopIdleWaiting()) break
+                            delay(60_000) // Keep the visible service if a reliable wake-up scan could not be installed.
+                        }
+                    }
                 }
-            }.distinctUntilChanged()
+            }
+            val radio = radioChanges().distinctUntilChanged()
             combine(app.vehicles.vehicles, app.autoConnect.verified, app.autoConnect.enabled, radio) { profiles, verified, enabled, ready ->
-                MonitorTarget(profiles.map { it.vin }.toSet(), verified, enabled, ready.first, ready.second, ready.third)
+                MonitorTarget(profiles.map { it.vin }.toSet(), verified, enabled, ready.permissions, ready.bluetooth, ready.location,
+                    radioRevision = ready.revision)
             }.combine(app.bluetoothStart.state) { target, bluetooth ->
                 target.copy(triggerAllowed = bluetooth.allowed, triggerName = bluetooth.selectedNames.takeIf { it.isNotEmpty() })
             }.combine(app.drive.state) { target, drive ->
@@ -119,6 +132,45 @@ class AutoConnectService : Service() {
         return START_STICKY
     }
 
+    /** Polling alone misses an off/on cycle between polls: Android has discarded the old scan. */
+    private fun radioChanges() = callbackFlow {
+        var revision = 0
+        fun sample(bluetoothOverride: Boolean? = null) {
+            val permissions = AutoConnectSettings.ready(this@AutoConnectService)
+            val bluetooth = permissions && (bluetoothOverride ?: runCatching {
+                getSystemService(BluetoothManager::class.java)?.adapter?.isEnabled == true
+            }.getOrDefault(false))
+            val location = LocationManagerCompat.isLocationEnabled(getSystemService(LocationManager::class.java))
+            if (bluetooth) app.bluetoothStart.refresh()
+            trySend(RadioState(permissions, bluetooth, location, revision))
+        }
+        val receiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context, intent: Intent) {
+                when (intent.action) {
+                    BluetoothAdapter.ACTION_STATE_CHANGED -> {
+                        when (intent.getIntExtra(BluetoothAdapter.EXTRA_STATE, -1)) {
+                            BluetoothAdapter.STATE_ON -> {
+                                // A revision also restores the scan if off/on events were coalesced downstream.
+                                revision++
+                                app.drive.recordAutomaticStart("Bluetooth 켜짐 · 차량 검색 복원")
+                                sample(true)
+                            }
+                            BluetoothAdapter.STATE_OFF, BluetoothAdapter.STATE_TURNING_OFF -> sample(false)
+                        }
+                    }
+                    LocationManager.MODE_CHANGED_ACTION -> sample()
+                }
+            }
+        }
+        val filter = IntentFilter(BluetoothAdapter.ACTION_STATE_CHANGED).apply { addAction(LocationManager.MODE_CHANGED_ACTION) }
+        // Bluetooth broadcasts may originate from a separate privileged UID. These are protected actions.
+        ContextCompat.registerReceiver(this@AutoConnectService, receiver, filter, ContextCompat.RECEIVER_EXPORTED)
+        sample()
+        val repair = launch { while (isActive) { delay(30_000); sample() } }
+        val refresh = launch { for (ignored in refreshRadio) { revision++; sample() } }
+        awaitClose { repair.cancel(); refresh.cancel(); unregisterReceiver(receiver) }
+    }
+
     // Leaving this function stops the scan; a killed process skips the finally block and keeps it.
     private suspend fun scan(names: Set<String>) {
         try {
@@ -126,7 +178,28 @@ class AutoConnectService : Service() {
             app.autoConnect.report("등록 차량 ${names.size}대 접근 대기 · 먼저 감지된 차량에 연결")
             ProximityScan.arm(this, names)
             error("BLE 검색 오류 ${ProximityScan.failures.first()}")
-        } finally { ProximityScan.disarm(this) }
+        } finally { if (!preserveScanOnStop) ProximityScan.disarm(this) }
+    }
+
+    /** Remove the foreground service rather than hiding a notification while keeping long-running work alive. */
+    private fun stopIdleWaiting(): Boolean {
+        if (app.bluetoothStart.state.value.selectedDevices.isEmpty()) {
+            val names = app.autoConnect.proximity.scanNames
+            val bluetoothOn = runCatching { getSystemService(BluetoothManager::class.java)?.adapter?.isEnabled == true }.getOrDefault(false)
+            if (names.isNotEmpty() && bluetoothOn && AutoConnectSettings.ready(this)) {
+                if (runCatching { ProximityScan.arm(this, names) }.isFailure) return false
+                preserveScanOnStop = true // Android owns this PendingIntent scan after the service exits.
+            }
+        }
+        quietStopping = true
+        app.autoConnect.quiet(true)
+        app.drive.recordAutomaticStart("하차·연결 대기 2분 · 상시 알림 해제 · 자동 연결 설정 유지")
+        if (app.drive.state.value.active || DriveService.busy) DriveService.stopForIdle(this)
+        running = false
+        stopForeground(STOP_FOREGROUND_REMOVE)
+        getSystemService(NotificationManager::class.java).cancel(NOTIFICATION)
+        stopSelf()
+        return true
     }
 
     private fun notification(message: String): Notification {
@@ -140,7 +213,8 @@ class AutoConnectService : Service() {
     override fun onDestroy() { running = false; scope.cancel(); super.onDestroy() }
     override fun onBind(intent: Intent?): IBinder? = null
 
-    private data class MonitorTarget(val registered: Set<String>, val verified: Set<String>, val enabled: Boolean, val permissions: Boolean, val bluetooth: Boolean, val location: Boolean, val triggerAllowed: Boolean = true, val triggerName: String? = null, val vehicleActive: Boolean = false)
+    private data class RadioState(val permissions: Boolean, val bluetooth: Boolean, val location: Boolean, val revision: Int)
+    private data class MonitorTarget(val registered: Set<String>, val verified: Set<String>, val enabled: Boolean, val permissions: Boolean, val bluetooth: Boolean, val location: Boolean, val triggerAllowed: Boolean = true, val triggerName: String? = null, val vehicleActive: Boolean = false, val radioRevision: Int = 0)
 
     companion object {
         @Volatile var running = false
@@ -167,6 +241,7 @@ class AutoConnectService : Service() {
         }
         fun disable(context: Context) {
             val app = context.applicationContext as TeslaNaviApp
+            app.drive.recordAutomaticStart("사용자 요청 · 자동 연결 끄기")
             app.autoConnect.setEnabled(false)
             ProximityScan.disarm(context)
             running = false

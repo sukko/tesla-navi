@@ -9,7 +9,7 @@ class ProximityGate {
     fun observe(rssi: Int, connectable: Boolean, now: Long, canAttempt: Boolean = true): Boolean {
         if (lastSeen?.let { now - it >= 60_000 } == true) waitingForDeparture = false
         lastSeen = now
-        if (!canAttempt || !connectable || rssi < -78 || waitingForDeparture || now < retryAt) return false
+        if (!canAttempt || !connectable || rssi < MIN_RSSI || waitingForDeparture || now < retryAt) return false
         retryAt = now + 60_000
         return true
     }
@@ -20,4 +20,5 @@ class ProximityGate {
     }
 
     fun reset() { lastSeen = null; retryAt = 0; waitingForDeparture = false }
+    companion object { const val MIN_RSSI = -78 }
 }

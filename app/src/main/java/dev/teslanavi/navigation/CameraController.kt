@@ -146,7 +146,8 @@ class CameraController(
                                     positionSource = if (fresh) event.source else it.positionSource,
                                     currentSpeedKph = speed, roadClass = road, overSpeed = overSpeed, overSpeedCamera = speedCamera) }
                                 speaker.setOverSpeedAlert(overSpeed && !_state.value.muted)
-                                if (!fresh && tripSpeech == null) speaker.silence()
+                                // At a D-gear traffic stop the SDK may stop emitting fresh positions.
+                                // Defer new announcements, but let already accepted speech finish.
                                 if (fresh && !_state.value.muted && _state.value.voiceError == null) {
                                     val now = clock()
                                     val presence = cameras.firstNotNullOfOrNull { policy.next(it, road, now, settings.value) }
@@ -196,7 +197,6 @@ class CameraController(
                                 }
                                 if (_state.value.locationAtMillis?.let { clock() - it > 10000 } == true) {
                                     speaker.setOverSpeedAlert(false)
-                                    if (tripSpeech == null) speaker.silence()
                                     _state.update { it.copy(phase = CameraPhase.WAITING_GPS, cameras = emptyList(),
                                         locationAtMillis = null, currentSpeedKph = null, roadClass = RoadClass.UNKNOWN,
                                         overSpeed = false, overSpeedCamera = null, message = "현재 위치를 다시 확인하고 있습니다") }

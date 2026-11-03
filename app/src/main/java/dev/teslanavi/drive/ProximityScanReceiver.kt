@@ -27,6 +27,11 @@ class ProximityScanReceiver : BroadcastReceiver() {
             ScanResult::class.java).orEmpty()
         if (results.isEmpty()) return
         if (!AutoConnectService.running) {
+            app.autoConnect.proximity.update(app.vehicles.vehicles.value.map { it.vin }.toSet(), app.autoConnect.verified.value)
+            if (results.none { app.autoConnect.proximity.canWake(it.scanRecord?.deviceName, it.rssi, it.isConnectable) }) return
+            // A queued result from the scan we just stopped must not reopen the exited car's notification.
+            if (app.autoConnect.quietWaiting.value && app.bluetoothStart.state.value.selectedDevices.isNotEmpty() &&
+                !app.bluetoothStart.state.value.allowed) return
             // The waiting service owns vehicle connections; restore it and let it handle the next sightings.
             try { AutoConnectService.start(context) }
             catch (_: Exception) { app.autoConnect.report("앱에서 자동 연결을 다시 켜 주세요") }

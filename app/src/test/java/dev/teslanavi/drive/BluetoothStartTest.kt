@@ -22,6 +22,17 @@ import org.robolectric.annotation.Config
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34], application = TeslaNaviApp::class)
 class BluetoothStartTest {
+    @Test fun bluetoothOnRestoresWaitingServiceWithoutTurningDisabledAutomationBackOn() {
+        app.autoConnect.setEnabled(true)
+        val receiver = BluetoothStartReceiver()
+        val on = Intent(BluetoothAdapter.ACTION_STATE_CHANGED).putExtra(BluetoothAdapter.EXTRA_STATE, BluetoothAdapter.STATE_ON)
+        receiver.onReceive(app, on)
+        assertEquals(AutoConnectService::class.java.name, shadowOf(app).nextStartedService.component!!.className)
+        app.autoConnect.setEnabled(false)
+        receiver.onReceive(app, on)
+        assertNull(shadowOf(app).nextStartedService)
+        assertFalse(AutoConnectSettings(app).enabled.value)
+    }
     @Test fun refreshingProfilesRestoresAlreadyConnectedDeviceWithoutConnectionBroadcast() {
         val device = adapter.getRemoteDevice(address)
         var connected: List<BluetoothDevice> = listOf(device)

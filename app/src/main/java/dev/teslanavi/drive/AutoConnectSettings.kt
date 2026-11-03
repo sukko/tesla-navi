@@ -13,7 +13,10 @@ class AutoConnectSettings(context: Context) {
     private val prefs = context.getSharedPreferences("auto-connect", Context.MODE_PRIVATE)
     private val _enabled = MutableStateFlow(prefs.getBoolean("enabled", false))
     val enabled = _enabled.asStateFlow()
-    private val _status = MutableStateFlow(if (_enabled.value) "자동 연결을 준비하고 있습니다" else "자동 연결 꺼짐")
+    private val _quiet = MutableStateFlow(_enabled.value && prefs.getBoolean("quiet-waiting", false))
+    val quietWaiting = _quiet.asStateFlow()
+    private val _status = MutableStateFlow(if (!_enabled.value) "자동 연결 꺼짐" else if (_quiet.value)
+        "알림 없이 다음 차량 연결을 기다리고 있습니다" else "자동 연결을 준비하고 있습니다")
     val status = _status.asStateFlow()
     private val _verified = MutableStateFlow(prefs.getStringSet("verified-vins", emptySet())!!.toSet())
     val verified = _verified.asStateFlow()
@@ -21,8 +24,16 @@ class AutoConnectSettings(context: Context) {
     fun setEnabled(value: Boolean) {
         check(prefs.edit().putBoolean("enabled", value).commit())
         _enabled.value = value
+        quiet(false)
         if (!value) proximity.reset()
         if (!value) _status.value = "자동 연결 꺼짐"
+    }
+
+    fun quiet(value: Boolean) {
+        if (_quiet.value == value) return
+        check(prefs.edit().putBoolean("quiet-waiting", value).commit())
+        _quiet.value = value
+        if (value) _status.value = "알림 없이 다음 차량 연결을 기다리고 있습니다"
     }
 
     fun verified(vin: String) {

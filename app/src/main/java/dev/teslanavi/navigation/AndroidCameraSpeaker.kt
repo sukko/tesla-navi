@@ -65,6 +65,13 @@ class AndroidCameraSpeaker(private val context: Context,
                             setVolume(gain)
                             play()
                         }
+                    val playing = track
+                    handler.postDelayed({
+                        if (track === playing) {
+                            releaseChimeTrack()
+                            if (!alarm && utterance == null) releaseFocus()
+                        }
+                    }, bytes.size * 1000L / (2 * WarningChime.SAMPLE_RATE) + 100)
                 }.onFailure { android.util.Log.w("TeslaNaviAudio", "과속 경고음 출력 실패", it); setOverSpeedAlert(false) }
             }
             if (alarm) handler.postDelayed(this, 2000)
@@ -278,7 +285,8 @@ class AndroidCameraSpeaker(private val context: Context,
         alarm = active
         handler.removeCallbacks(alarmLoop)
         if (active) handler.postDelayed(alarmLoop, 1500)
-        else { track?.pause(); track?.release(); track = null; if (utterance == null) releaseFocus() }
+        // Cancelling future repeats must not cut the second note off halfway through.
+        else if (track == null && utterance == null) releaseFocus()
     }
 
     private fun stopSpeech() {
@@ -293,7 +301,8 @@ class AndroidCameraSpeaker(private val context: Context,
         callback?.invoke(false)
         if (!alarm) releaseFocus()
     }
-    override fun silence() { setOverSpeedAlert(false); stopSpeech(); releaseFocus() }
+    private fun releaseChimeTrack() { track?.let { runCatching { it.stop() }; it.release() }; track = null }
+    override fun silence() { setOverSpeedAlert(false); releaseChimeTrack(); stopSpeech(); releaseFocus() }
     private fun releaseFocus() {
         focus?.let { audio.abandonAudioFocusRequest(it) }; focus = null
 

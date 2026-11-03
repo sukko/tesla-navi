@@ -239,6 +239,29 @@ class AndroidCameraSpeakerTest {
             assertEquals(listOf(false), results)
         } finally { speaker.close() }
     }
+    @Test fun slowingDownFinishesCurrentBellButMuteStopsItImmediately() {
+        val context = ApplicationProvider.getApplicationContext<TeslaNaviApp>()
+        shadowOf(context.getSystemService(AudioManager::class.java)).setNextFocusRequestResponse(AudioManager.AUDIOFOCUS_REQUEST_GRANTED)
+        val speaker = AndroidCameraSpeaker(context)
+        try {
+            speaker.setOverSpeedAlert(true)
+            shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(1700))
+            val bell = checkNotNull(trackOf(speaker))
+            speaker.setOverSpeedAlert(false)
+            assertSame(bell, trackOf(speaker))
+            assertEquals(AudioTrack.PLAYSTATE_PLAYING, bell.playState)
+            shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(1500))
+            assertNull(trackOf(speaker))
+            shadowOf(Looper.getMainLooper()).idleFor(Duration.ofSeconds(5))
+            assertNull(trackOf(speaker))
+            speaker.setOverSpeedAlert(true)
+            shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(1600))
+            assertNotNull(trackOf(speaker))
+            speaker.silence()
+            assertNull(trackOf(speaker))
+        } finally { speaker.close() }
+    }
+
     @Test fun stoppedSpeechAllowsOverspeedSpeechAndRepeatingChime() = runTest {
         val context = ApplicationProvider.getApplicationContext<TeslaNaviApp>()
         shadowOf(context.getSystemService(AudioManager::class.java))
@@ -261,7 +284,7 @@ class AndroidCameraSpeakerTest {
             speech.utteranceProgressListener.onDone(speech.lastId)
             shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(1500))
             shadowOf(Looper.getMainLooper()).idle()
-            shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(2000))
+            shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(1500))
             val firstChime = checkNotNull(trackOf(speaker))
             assertEquals(AudioTrack.PLAYSTATE_PLAYING, firstChime.playState)
             shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(2000))

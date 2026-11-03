@@ -71,6 +71,32 @@ class CameraControllerTest {
         assertNull(engine.fixes.last())
         job.cancelAndJoin()
     }
+    @Test fun driveZeroAndMissingGpsFinishTheCurrentCameraSentenceWithoutRestartingGuidance() = runTest {
+        val engine = FakeNavigationEngine()
+        val speaker = FakeSpeaker().apply { deferCompletion = true }
+        val drive = MutableStateFlow(connected(speed = 70.0))
+        val controller = CameraController(engine, speaker) { testScheduler.currentTime }
+        val job = backgroundScope.launch { controller.run("key", drive) }
+        runCurrent()
+        engine.frame(listOf(camera), 0, speed = 70); runCurrent()
+        assertEquals(1, speaker.spoken.size)
+        val silences = speaker.silenceCalls
+        drive.value = connected(speed = 0.0, gear = Gear.DRIVE); runCurrent()
+        // Some devices stop issuing fresh GPS positions at a red light.
+        advanceTimeBy(11_001); runCurrent()
+        engine.frame(listOf(camera), 0, speed = 0); runCurrent()
+        assertEquals(CameraPhase.WAITING_GPS, controller.state.value.phase)
+        assertFalse(speaker.alarm)
+        assertEquals("Only new guidance waits for GPS; an accepted sentence must finish", silences, speaker.silenceCalls)
+        assertEquals(1, engine.destinations.size)
+        speaker.finish(true)
+        engine.frame(listOf(camera), testScheduler.currentTime, speed = 0); runCurrent()
+        assertEquals(1, speaker.spoken.size)
+        drive.value = connected(speed = 0.0, gear = Gear.PARK); runCurrent()
+        assertTrue("P still stops guidance immediately", speaker.silenceCalls > silences)
+        job.cancelAndJoin()
+    }
+
     @Test fun staleGpsDoesNotInterruptTripStartOrRepeatItAfterAnInterruptedPlayback() = runTest {
         val engine = FakeNavigationEngine()
         val speaker = FakeSpeaker().apply { deferCompletion = true }

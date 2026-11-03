@@ -23,7 +23,8 @@ class TeslaNaviApp : Application() {
     val logbookSettings by lazy { LogbookSettings(this) }
     val logbook by lazy { LogbookStore(this) }
     val geminiSettings by lazy { GeminiSettings(this) }
-    val gemini by lazy { GeminiVoice(geminiSettings::apiKey, java.io.File(cacheDir, "gemini-tts"), speaker = { guidance.options.value.geminiSpeaker }) }
+    val geminiUsage by lazy { GeminiTtsUsage(this) }
+    val gemini by lazy { GeminiVoice(geminiSettings::apiKey, java.io.File(cacheDir, "gemini-tts"), speaker = { guidance.options.value.geminiSpeaker }, usage = geminiUsage) }
     val trips by lazy { TripStore(this) }
     val walkingSteps by lazy { WalkingSteps(this) }
     val cameras by lazy {

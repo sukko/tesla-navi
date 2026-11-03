@@ -59,4 +59,23 @@ class GeminiVoiceChoiceTest {
         }
     }
 
+    @Test fun showsPersistedCountsAndTheThirdSynthesisModelWithoutCloudRequests() {
+        val app = ApplicationProvider.getApplicationContext<TeslaNaviApp>()
+        compose.runOnIdle {
+            app.features.setSettingsTab(true)
+            val state = org.robolectric.util.ReflectionHelpers.getField<kotlinx.coroutines.flow.MutableStateFlow<GeminiKeyState>>(app.geminiSettings, "mutable")
+            state.value = GeminiKeyState(hasKey = true)
+            repeat(4) { assertNotNull(app.geminiUsage.acquire()) }
+        }
+        compose.onNodeWithContentDescription("설정").performClick()
+        compose.onNodeWithText("안내 설정").performScrollTo().performClick()
+        compose.onNodeWithText("Gemini 사용량 · 앱에서 집계").performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText("새 음성 생성: 3.8 Flash TTS").performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText("3.1 Flash TTS\n최근 1분 2/3회 · 하루 2/10회").performScrollTo().assertIsDisplayed()
+        compose.runOnIdle {
+            assertEquals(2, GeminiTtsUsage(app).state.value.primary.rpd)
+            assertEquals(GeminiTtsModel.FLASH, GeminiTtsUsage(app).state.value.model)
+        }
+    }
+
 }

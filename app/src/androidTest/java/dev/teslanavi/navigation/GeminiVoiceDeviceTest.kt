@@ -23,7 +23,7 @@ class GeminiVoiceDeviceTest {
         assumeTrue(app.geminiSettings.state.value.hasKey)
         assumeTrue(!app.drive.state.value.active && !DriveService.busy && !app.cameras.state.value.phoneFallback)
         var selected = GeminiSpeaker.Kore
-        val voice = GeminiVoice(app.geminiSettings::apiKey, File(app.cacheDir, "gemini-tts"), speaker = { selected })
+        val voice = GeminiVoice(app.geminiSettings::apiKey, File(app.cacheDir, "gemini-tts"), speaker = { selected }, usage = app.geminiUsage)
         val transcript = "300미터 앞 과속 단속 카메라가 있습니다. 제한속도 시속 60킬로미터입니다."
         val samples = mutableListOf<Pcm>()
         for (choice in listOf(GeminiSpeaker.Kore, GeminiSpeaker.Zephyr)) {

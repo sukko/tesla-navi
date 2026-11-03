@@ -12,10 +12,11 @@ import java.security.MessageDigest
 class GeminiVoice(
     private val apiKey: () -> String,
     private val cacheDir: File,
-    private val synthesize: (String, String, GeminiSpeaker) -> Pcm = GeminiTtsClient()::synthesize,
+    private val synthesize: (String, String, GeminiSpeaker, GeminiTtsModel) -> Pcm = GeminiTtsClient()::synthesize,
     private val clock: () -> Long = { System.nanoTime() / 1_000_000 },
     private val waitMillis: Long = 2500,
     private val speaker: () -> GeminiSpeaker = { GeminiSpeaker.Kore },
+    val usage: GeminiTtsUsage = GeminiTtsUsage(),
 ) : PcmVoice {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val gate = Semaphore(1)
@@ -70,10 +71,10 @@ class GeminiVoice(
         if (!ready || generation != expectedGeneration) return@synchronized null
         val text = KoreanSpeechText.normalize(raw)
         val voice = speaker()
-        val hash = MessageDigest.getInstance("SHA-256").digest("${GeminiTtsClient.MODEL}/${voice.name}/v2/$text".toByteArray())
+        val hash = MessageDigest.getInstance("SHA-256").digest("phrase/${voice.name}/v2/$text".toByteArray())
             .joinToString("") { "%02x".format(it.toInt() and 255) }
-        val file = File(cacheDir, "$hash.pcm")
-        readCache(file)?.let { return@synchronized CompletableDeferred(it) }
+        usage.refresh()
+        cached(text, voice)?.let { mutable.value = null; return@synchronized CompletableDeferred(it) }
         requests[hash]?.let {
             if (urgent) speculative.remove(hash)
             return@synchronized it
@@ -92,15 +93,33 @@ class GeminiVoice(
                 synchronized(lock) { speculative.remove(hash) }
                 if (generation != token || clock() < retryAfter) return@withPermit null
                 try {
-                    currentCoroutineContext().ensureActive()
-                    val pcm = synthesize(key, text, voice)
-                    currentCoroutineContext().ensureActive()
-                    synchronized(lock) cache@{
-                        if (generation != token) return@cache null
-                        runCatching { writeCache(file, pcm) }
-                        mutable.value = null
-                        pcm
+                    repeat(GeminiTtsModel.entries.size) {
+                        currentCoroutineContext().ensureActive()
+                        synchronized(lock) { cached(text, voice) }?.let { return@withPermit it }
+                        val ticket = usage.acquire()
+                        if (ticket == null) {
+                            if (generation == token) mutable.value = usage.state.value.error
+                                ?: "Gemini 새 음성 생성 한도 대기 중 · 캐시 또는 기본 음성으로 안내합니다."
+                            return@withPermit null
+                        }
+                        currentCoroutineContext().ensureActive()
+                        val pcm = try { synthesize(key, text, voice, ticket.model) }
+                        catch (error: GeminiTtsFailure) {
+                            if (error.status != 429) throw error
+                            currentCoroutineContext().ensureActive()
+                            usage.rejected(ticket, error.dailyQuota, error.retryMillis)
+                            if (generation == token) mutable.value = error.safeMessage
+                            return@repeat // At most one attempt per model; quota errors never cause a retry storm.
+                        }
+                        currentCoroutineContext().ensureActive()
+                        return@withPermit synchronized(lock) cache@{
+                            if (generation != token) return@cache null
+                            runCatching { writeCache(cacheFile(ticket.model, text, voice), pcm) }
+                            mutable.value = null
+                            pcm
+                        }
                     }
+                    null
                 } catch (error: CancellationException) { throw error }
                 catch (error: Exception) {
                     synchronized(lock) {
@@ -119,6 +138,21 @@ class GeminiVoice(
         job.invokeOnCompletion { synchronized(lock) { if (requests[hash] === job) { requests.remove(hash); speculative.remove(hash) } } }
         job.start()
         job
+    }
+
+    private fun cacheFile(model: GeminiTtsModel, text: String, voice: GeminiSpeaker): File {
+        val hash = MessageDigest.getInstance("SHA-256").digest("${model.id}/${voice.name}/v2/$text".toByteArray())
+            .joinToString("") { "%02x".format(it.toInt() and 255) }
+        return File(cacheDir, "$hash.pcm")
+    }
+
+    /** Preserve existing 3.8 cache keys and reuse either model's cached speech without spending quota. */
+    private fun cached(text: String, voice: GeminiSpeaker): Pcm? {
+        val preferred = usage.state.value.model
+        for (model in listOf(preferred) + GeminiTtsModel.entries.filter { it != preferred }) {
+            readCache(cacheFile(model, text, voice))?.let { return it }
+        }
+        return null
     }
 
     private fun readCache(file: File): Pcm? = runCatching {

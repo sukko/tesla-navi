@@ -71,6 +71,25 @@ class ProximityScanReceiverTest {
         assertFalse(app.drive.state.value.active)
     }
 
+    @Test fun quietWaitDoesNotReopenNotificationFromAQueuedScanOfDisconnectedSelectedCar() {
+        readyVehicle()
+        app.bluetoothStart.select(mapOf("00:11:22:33:44:55" to "Car audio"))
+        app.autoConnect.quiet(true)
+        ProximityScanReceiver().onReceive(app, delivery(VehicleIdentity.localName(vin)))
+        assertNull(shadowOf(app).nextStartedService)
+        assertTrue(app.autoConnect.enabled.value)
+        assertTrue(app.autoConnect.quietWaiting.value)
+    }
+
+    @Test fun quietSystemScanWithoutAudioSelectionStillWakesForVerifiedNearbyVehicle() {
+        readyVehicle()
+        app.autoConnect.quiet(true)
+        ProximityScanReceiver().onReceive(app, delivery("unregistered"))
+        assertNull(shadowOf(app).nextStartedService)
+        ProximityScanReceiver().onReceive(app, delivery(VehicleIdentity.localName(vin)))
+        assertEquals(AutoConnectService::class.java.name, shadowOf(app).nextStartedService.component!!.className)
+    }
+
     @Test fun scanErrorReachesTheWaitingServiceRetryLoop() = runTest {
         readyVehicle()
         val failure = async(UnconfinedTestDispatcher(testScheduler)) { ProximityScan.failures.first() }

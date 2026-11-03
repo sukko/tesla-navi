@@ -19,7 +19,17 @@ class BluetoothStartReceiver : BroadcastReceiver() {
         val app = context.applicationContext as TeslaNaviApp
         if (intent.action == BluetoothAdapter.ACTION_STATE_CHANGED) {
             if (intent.getIntExtra(BluetoothAdapter.EXTRA_STATE, -1) != BluetoothAdapter.STATE_ON) app.bluetoothStart.radioOff()
-            else app.bluetoothStart.refresh()
+            else {
+                app.bluetoothStart.refresh()
+                if (app.autoConnect.enabled.value && !AutoConnectService.running && AutoConnectSettings.ready(context)) {
+                    app.drive.recordAutomaticStart("Bluetooth 켜짐 · 자동 연결 대기 서비스 복원")
+                    try { AutoConnectService.start(context) }
+                    catch (error: Exception) {
+                        app.drive.recordAutomaticStart("자동 연결 서비스 복원 실패 · ${error.javaClass.simpleName}")
+                        app.autoConnect.report("앱에서 자동 연결 대기를 다시 시작해 주세요")
+                    }
+                }
+            }
             return
         }
         val profile = when (intent.action) {
