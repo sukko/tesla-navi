@@ -38,7 +38,11 @@ internal fun CameraPositionStatus(state: CameraState) {
                 else "휴대폰 위치로 카메라 거리를 계산합니다."
             color = Color(0xFF69E3CD); background = Color(0xFF203732)
         }
-        CameraPhase.WAITING_GPS -> {
+        CameraPhase.WAITING_GPS -> if (state.stoppedInDrive) {
+            title = "정차 중 · 안내 유지"
+            detail = "위치가 다시 갱신되면 카메라 안내를 이어갑니다."
+            color = Color(0xFFA2AEBD); background = Color(0xFF242D38)
+        } else {
             title = "위치 수신 대기"
             detail = when {
                 state.phoneFallback || !state.vehicleAvailable -> "휴대폰 GPS를 기다리고 있습니다. 새 카메라 안내는 잠시 보류합니다."

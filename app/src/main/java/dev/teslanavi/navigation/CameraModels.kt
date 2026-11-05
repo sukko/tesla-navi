@@ -81,12 +81,13 @@ data class CameraState(
     /** Acknowledges the drive observer, so service teardown cannot race its fallback decision. */
     val vehicleAvailable: Boolean = false,
     val positionSource: PositionSource = PositionSource.PHONE,
+    val stoppedInDrive: Boolean = false,
 )
 
 /** How far before the alert distance a slow voice may start preparing the announcement. */
 const val PREPARE_METERS = 1000
 
-/** One presence announcement per camera; commit only after audio was accepted. */
+/** Suppress recently announced cameras once playback completes. */
 class CameraAlertPolicy {
     data class Announcement(val cameraId: String, val text: String, val atMillis: Long)
     private val announced = linkedMapOf<String, Long>()

@@ -658,6 +658,7 @@ private fun ColumnScope.VersionFooter() {
 
 @Composable
 private fun CameraCard(state: CameraState, hasKey: Boolean, onMute: (Boolean) -> Unit, options: GuidanceOptions, onStop: () -> Unit) {
+    val waitingAtStop = state.phase == CameraPhase.WAITING_GPS && state.stoppedInDrive
     AppCard {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
             Text("단속카메라 안내", fontWeight = FontWeight.SemiBold)
@@ -685,7 +686,7 @@ private fun CameraCard(state: CameraState, hasKey: Boolean, onMute: (Boolean) ->
             state.cameras.drop(1).forEach {
                 Text("${it.kind.label} · ${formatCameraDistance(it.distanceMeters)}", color = Muted, fontSize = 13.sp)
             }
-        } else Text(when (state.phase) {
+        } else if (!waitingAtStop) Text(when (state.phase) {
             CameraPhase.GUIDING -> "안내 중인 단속카메라가 없습니다"
             CameraPhase.WAITING_GPS -> "현재 위치를 확인하고 있어요"
             else -> state.message
@@ -701,7 +702,7 @@ private fun CameraCard(state: CameraState, hasKey: Boolean, onMute: (Boolean) ->
             RoadClass.GENERAL -> "일반도로 · 카메라 ${options.generalMeters} m 전 안내"
             RoadClass.UNKNOWN -> "도로 종류 확인 중 · 카메라 ${options.highwayMeters} m 전 예비 안내"
         }, color = Muted, fontSize = 11.sp)
-        if (state.mode != null) Text(state.message, color = Muted, fontSize = 12.sp)
+        if (state.mode != null && !waitingAtStop) Text(state.message, color = Muted, fontSize = 12.sp)
         state.error?.let { Text(it, color = MaterialTheme.colorScheme.error, fontSize = 13.sp) }
         state.voiceError?.let { Text(it, color = MaterialTheme.colorScheme.error, fontSize = 12.sp) }
 

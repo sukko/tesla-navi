@@ -36,8 +36,15 @@ class VehicleScreenTest {
         compose.onNodeWithText("차량 위치로 보조 안내 중").performScrollTo().assertIsDisplayed()
         compose.onNodeWithText("휴대폰 GPS 안내 중").assertDoesNotExist()
         saveScreenshot("vehicle-position-status")
-        compose.runOnIdle { cameraState.value = vehicle.copy(phase = dev.teslanavi.navigation.CameraPhase.WAITING_GPS, cameras = emptyList()) }
+        val waiting = vehicle.copy(phase = dev.teslanavi.navigation.CameraPhase.WAITING_GPS, cameras = emptyList(),
+            locationAtMillis = null, message = "현재 위치를 다시 확인하고 있습니다")
+        compose.runOnIdle { cameraState.value = waiting.copy(stoppedInDrive = true) }
+        compose.onNodeWithText("정차 중 · 안내 유지").performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText("위치 수신 대기").assertDoesNotExist()
+        compose.onNodeWithText("현재 위치를 다시 확인하고 있습니다").assertDoesNotExist()
+        compose.runOnIdle { cameraState.value = waiting }
         compose.onNodeWithText("위치 수신 대기").performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText("정차 중 · 안내 유지").assertDoesNotExist()
         compose.onNodeWithText("차량 위치로 보조 안내 중").assertDoesNotExist()
         // A BLE loss can precede the next SDK frame; the retained vehicle source must not claim active assistance.
         compose.runOnIdle { cameraState.value = vehicle.copy(vehicleAvailable = false, phoneFallback = true) }

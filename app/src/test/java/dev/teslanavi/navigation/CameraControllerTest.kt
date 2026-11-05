@@ -81,15 +81,22 @@ class CameraControllerTest {
         engine.frame(listOf(camera), 0, speed = 70); runCurrent()
         assertEquals(1, speaker.spoken.size)
         val silences = speaker.silenceCalls
-        drive.value = connected(speed = 0.0, gear = Gear.DRIVE); runCurrent()
+        val stopped = connected(speed = 0.0, gear = Gear.DRIVE)
+        drive.value = stopped.copy(updatedAt = System.currentTimeMillis()); runCurrent()
         // Some devices stop issuing fresh GPS positions at a red light.
         advanceTimeBy(11_001); runCurrent()
         engine.frame(listOf(camera), 0, speed = 0); runCurrent()
         assertEquals(CameraPhase.WAITING_GPS, controller.state.value.phase)
+        assertTrue(controller.state.value.stoppedInDrive)
         assertFalse(speaker.alarm)
         assertEquals("Only new guidance waits for GPS; an accepted sentence must finish", silences, speaker.silenceCalls)
         assertEquals(1, engine.destinations.size)
         speaker.finish(true)
+        drive.value = stopped.copy(updatedAt = System.currentTimeMillis() - 11_000); runCurrent()
+        assertFalse(controller.state.value.stoppedInDrive)
+        drive.value = connected(speed = 10.0).copy(updatedAt = System.currentTimeMillis()); runCurrent()
+        assertFalse(controller.state.value.stoppedInDrive)
+        assertEquals(CameraPhase.WAITING_GPS, controller.state.value.phase)
         engine.frame(listOf(camera), testScheduler.currentTime, speed = 0); runCurrent()
         assertEquals(1, speaker.spoken.size)
         drive.value = connected(speed = 0.0, gear = Gear.PARK); runCurrent()
@@ -533,6 +540,44 @@ class CameraControllerTest {
         runCurrent()
         assertTrue(controller.state.value.cameras.isEmpty())
         assertEquals(count, speaker.spoken.size)
+        job.cancelAndJoin()
+    }
+
+    @Test fun completedCameraIsNotRepeatedAcrossReroutingAndReconnect() = runTest {
+        val engine = FakeNavigationEngine()
+        val speaker = FakeSpeaker()
+        val controller = CameraController(engine, speaker) { testScheduler.currentTime }
+        val drive = MutableStateFlow(connected())
+        val job = backgroundScope.launch { controller.run("key", drive) }
+        runCurrent()
+        engine.frame(listOf(camera), 0)
+        runCurrent()
+        val firstAnnouncement = speaker.spoken.single()
+
+        engine.events.emit(NavigationUpdate(engine.revision, NavigationEvent.RouteInvalidated("test reroute")))
+        engine.frame(listOf(camera.copy(distanceMeters = 300)), 0, source = PositionSource.VEHICLE)
+        runCurrent()
+        assertEquals(listOf(firstAnnouncement), speaker.spoken)
+
+        drive.value = connected(NavigationDestination.None)
+        runCurrent()
+        engine.frame(listOf(camera.copy(distanceMeters = 200)), 0)
+        runCurrent()
+        assertEquals(listOf(firstAnnouncement), speaker.spoken)
+
+        drive.value = DriveState(vin = "vehicle-a", phase = DrivePhase.RECONNECTING)
+        runCurrent()
+        drive.value = connected()
+        runCurrent()
+        engine.frame(listOf(camera.copy(distanceMeters = 100)), 0, speed = 70)
+        runCurrent()
+        assertEquals(listOf(firstAnnouncement, "제한속도 60킬로미터 초과입니다."), speaker.spoken)
+        assertTrue(speaker.alarm)
+
+        engine.frame(listOf(camera.copy(id = "camera-b", distanceMeters = 100)), 0)
+        runCurrent()
+        assertTrue(speaker.spoken.last().startsWith("100미터 앞"))
+        assertEquals(3, speaker.spoken.size)
         job.cancelAndJoin()
     }
 

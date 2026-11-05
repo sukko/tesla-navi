@@ -39,7 +39,7 @@ class CameraAlertPolicyTest {
         assertFalse(text.contains("60"))
         assertTrue(text.contains("가변 제한속도 표지판"))
     }
-    @Test fun cancelledRouteResetsSuppressionAndRealRevisitExpires() {
+    @Test fun newTripResetsSuppressionAndRealRevisitExpires() {
         val policy = CameraAlertPolicy()
         policy.commit(checkNotNull(policy.next(camera, RoadClass.GENERAL, 0)))
         assertNull(policy.next(camera, RoadClass.GENERAL, 1000))

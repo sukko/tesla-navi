@@ -3,6 +3,7 @@ package dev.teslanavi.navigation
 import dev.teslanavi.drive.DrivePhase
 import dev.teslanavi.drive.DriveState
 import dev.teslanavi.drive.TripMotionGate
+import dev.teslanavi.protocol.Gear
 import dev.teslanavi.protocol.NavigationDestination
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.*
@@ -46,7 +47,6 @@ class CameraController(
         audioGeneration++
         tripSpeech = null
         acceptingFrames = false
-        policy.clear()
         overSpeedPolicy.clear()
         speaker.setOverSpeedAlert(false)
         speaker.silence()
@@ -59,7 +59,8 @@ class CameraController(
         try {
             coroutineScope {
                 _state.update { it.copy(phase = CameraPhase.WAITING_VEHICLE, message = "차량 연결을 기다리고 있습니다", error = null,
-                    phoneFallback = false, continuationExpired = false, vehicleAvailable = false, continuationEndReason = null) }
+                    phoneFallback = false, continuationExpired = false, vehicleAvailable = false,
+                    stoppedInDrive = false, continuationEndReason = null) }
                 launch(start = CoroutineStart.UNDISPATCHED) {
                     settings.collect { speaker.setVolume(it.volumePercent) }
                 }
@@ -106,7 +107,7 @@ class CameraController(
                                 if (_state.value.mode != event.mode) {
                                     audioGeneration++
                                     tripSpeech = null
-                                    policy.clear(); overSpeedPolicy.clear(); speaker.setOverSpeedAlert(false); speaker.silence()
+                                    overSpeedPolicy.clear(); speaker.setOverSpeedAlert(false); speaker.silence()
                                     _state.update { it.copy(cameras = emptyList(), locationAtMillis = null,
                                         currentSpeedKph = null, roadClass = RoadClass.UNKNOWN, overSpeed = false, overSpeedCamera = null) }
                                 }
@@ -115,7 +116,7 @@ class CameraController(
                             is NavigationEvent.RouteInvalidated -> {
                                 audioGeneration++
                                 tripSpeech = null
-                                policy.clear(); overSpeedPolicy.clear(); speaker.setOverSpeedAlert(false); speaker.silence()
+                                overSpeedPolicy.clear(); speaker.setOverSpeedAlert(false); speaker.silence()
                                 _state.update { it.copy(cameras = emptyList(), locationAtMillis = null,
                                     phase = CameraPhase.WAITING_GPS, message = event.message,
                                     currentSpeedKph = null, roadClass = RoadClass.UNKNOWN, overSpeed = false, overSpeedCamera = null) }
@@ -206,13 +207,18 @@ class CameraController(
                 }
                 combine(drive, tick) { current, now ->
                     if (tripVin != current.vin) movement.update(null, false, null)
-                    if (tripVin != current.vin || current.snapshot?.gear == dev.teslanavi.protocol.Gear.PARK) {
+                    if (tripVin != current.vin || current.snapshot?.gear == Gear.PARK) {
+                        // Keep completed camera announcements through route and connection resets within a trip.
+                        policy.clear()
                         tripVin = current.vin; tripAnnounced = false; pendingTrip = false
                     }
                     val available = current.phase == DrivePhase.CONNECTED && current.snapshot != null
                     // Preserve the motion latch through a lost BLE link, including a reconnect at a traffic light.
                     val moving = if (available || current.phase == DrivePhase.IDLE)
                         movement.update(current.vin, available, current.snapshot) else false
+                    val stoppedInDrive = moving && current.snapshot?.gear == Gear.DRIVE &&
+                        current.snapshot.speedKph == 0.0 &&
+                        current.updatedAt?.let { System.currentTimeMillis() - it in 0..10_000 } == true
                     val fallback = continuation.update(current, moving, now)
                     if (continuation.expired) {
                         movement.update(null, false, null)
@@ -222,7 +228,7 @@ class CameraController(
                     val previousEnd = _state.value.continuationEndReason
                     _state.update { it.copy(phoneFallback = continuation.usingPhone, continuationExpired = continuation.expired,
                         continuationEndReason = continuation.endReason,
-                        vehicleAvailable = available,
+                        vehicleAvailable = available, stoppedInDrive = stoppedInDrive,
                         phase = if (continuation.expired) CameraPhase.IDLE else it.phase,
                         mode = if (continuation.expired) null else it.mode,
                         message = if (continuation.expired) continuation.endMessage else it.message) }
@@ -294,7 +300,7 @@ class CameraController(
         } finally {
             engine.updateVehicleFix(null)
             invalidate(); engine.pause(); speaker.close()
-            _state.update { it.copy(phoneFallback = false, vehicleAvailable = false) }
+            _state.update { it.copy(phoneFallback = false, vehicleAvailable = false, stoppedInDrive = false) }
             if (_state.value.phase != CameraPhase.ERROR && !_state.value.continuationExpired) configured(true)
         }
     }
