@@ -37,11 +37,7 @@ class DriveService : Service() {
         if (intent?.action == OWNERSHIP) {
             if (session?.isActive == true) {
                 if (AutoConnectService.running) stopForeground(STOP_FOREGROUND_REMOVE)
-                else ServiceCompat.startForeground(this, 1, notification(if (app.cameras.state.value.phoneFallback)
-                    "차량 연결 끊김 · 마지막 목적지로 카메라 안내 중" else app.drive.state.value.status),
-                    if (Build.VERSION.SDK_INT >= 29) ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE or
-                        (if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED)
-                            ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION else 0) else 0)
+                else showSessionForeground()
             }
             return START_NOT_STICKY
         }
@@ -63,12 +59,20 @@ class DriveService : Service() {
             stopSelf()
             return START_NOT_STICKY
         }
-        if (session?.isActive == true) return START_NOT_STICKY
+        val foregroundStart = intent?.getBooleanExtra(EXTRA_FOREGROUND_START, false) == true
+        if (session?.isActive == true) {
+            // A repeated startForegroundService() still obliges startForeground(); keep the running session's types.
+            if (foregroundStart) {
+                showSessionForeground()
+                if (AutoConnectService.running) stopForeground(STOP_FOREGROUND_REMOVE)
+            }
+            return START_NOT_STICKY
+        }
         val automatic = intent?.getBooleanExtra("automatic", false) == true
         val profile = app.vehicles.vehicles.value.firstOrNull { it.vin == intent?.getStringExtra("vin") }
-        if (profile == null) { app.drive.clear(); stopSelf(); return START_NOT_STICKY }
+        if (profile == null) { app.drive.clear(); stopIgnoredStart(foregroundStart); return START_NOT_STICKY }
         if (automatic && (!app.autoConnect.enabled.value || profile.vin !in app.autoConnect.verified.value)) {
-            app.drive.clear(); stopSelf(); return START_NOT_STICKY
+            app.drive.clear(); stopIgnoredStart(foregroundStart); return START_NOT_STICKY
         }
         if (automatic) app.vehicles.select(profile.vin)
         val nativeKey = app.kakao.nativeKey.orEmpty()
@@ -146,6 +150,36 @@ class DriveService : Service() {
         return START_NOT_STICKY
     }
 
+    /** Foreground notification for a running session; a failure leaves the session running as it was. */
+    private fun showSessionForeground() {
+        try {
+            ServiceCompat.startForeground(this, 1, notification(if (app.cameras.state.value.phoneFallback)
+                "차량 연결 끊김 · 마지막 목적지로 카메라 안내 중" else app.drive.state.value.status),
+                if (Build.VERSION.SDK_INT >= 29) ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE or
+                    (if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED)
+                        ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION else 0) else 0)
+        } catch (error: Exception) {
+            android.util.Log.w("TeslaNaviConnection", "Foreground notification failed: ${error.javaClass.simpleName}")
+        }
+    }
+
+    /**
+     * Android kills the app when a service started with startForegroundService() stops before calling
+     * startForeground(), even when the start is ignored. Satisfy that contract briefly, then leave.
+     */
+    private fun stopIgnoredStart(foregroundStart: Boolean) {
+        if (foregroundStart) {
+            try {
+                ServiceCompat.startForeground(this, 1, notification("차량 연결 준비 중"),
+                    if (Build.VERSION.SDK_INT >= 29) ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE else 0)
+            } catch (error: Exception) {
+                android.util.Log.w("TeslaNaviConnection", "Ignored start could not enter foreground: ${error.javaClass.simpleName}")
+            }
+            stopForeground(STOP_FOREGROUND_REMOVE)
+        }
+        stopSelf()
+    }
+
     private fun notification(message: String): Notification {
         val open = PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
         val stop = PendingIntent.getService(this, 1, Intent(this, DriveService::class.java).setAction(STOP), PendingIntent.FLAG_IMMUTABLE)
@@ -167,6 +201,8 @@ class DriveService : Service() {
         @Volatile var busy = false
             private set
         private const val CHANNEL = "vehicle-connection"
+        /** Set when the start used startForegroundService(), which obliges a startForeground() call. */
+        private const val EXTRA_FOREGROUND_START = "foregroundStart"
         private const val OWNERSHIP = "dev.teslanavi.NOTIFICATION_OWNER"
         fun notificationOwnerChanged(context: Context) {
             context.startService(Intent(context, DriveService::class.java).setAction(OWNERSHIP))
@@ -177,7 +213,8 @@ class DriveService : Service() {
         fun start(context: Context, vin: String, enroll: Boolean, automatic: Boolean = false) {
             val intent = Intent(context, DriveService::class.java)
                 .putExtra("vin", vin).putExtra("enroll", enroll).putExtra("automatic", automatic)
-            if (AutoConnectService.running) context.startService(intent) else ContextCompat.startForegroundService(context, intent)
+            if (AutoConnectService.running) context.startService(intent)
+            else ContextCompat.startForegroundService(context, intent.putExtra(EXTRA_FOREGROUND_START, true))
         }
         fun stop(context: Context) { context.startService(Intent(context, DriveService::class.java).setAction(STOP)) }
     }

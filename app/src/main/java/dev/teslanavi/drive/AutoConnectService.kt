@@ -46,6 +46,18 @@ class AutoConnectService : Service() {
         if (!app.autoConnect.enabled.value || !AutoConnectSettings.ready(this)) {
             app.autoConnect.report("자동 연결 권한을 확인해 주세요")
             ProximityScan.disarm(this)
+            // start() always uses startForegroundService(); stopping before startForeground() crashes the app.
+            // A sticky restart (null intent) carries no such obligation.
+            if (intent != null) {
+                try {
+                    ServiceCompat.startForeground(this, NOTIFICATION, notification("자동 연결 권한을 확인해 주세요"),
+                        if (Build.VERSION.SDK_INT >= 29) ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE else 0)
+                } catch (error: Exception) {
+                    app.drive.recordAutomaticStart("대기 서비스 종료 알림 실패 · ${error.javaClass.simpleName}")
+                }
+                running = false
+                stopForeground(STOP_FOREGROUND_REMOVE)
+            }
             stopSelf()
             return START_NOT_STICKY
         }

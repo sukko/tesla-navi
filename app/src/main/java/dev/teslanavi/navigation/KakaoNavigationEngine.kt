@@ -276,10 +276,14 @@ class KakaoNavigationEngine(private val app: Application, private val settings: 
             val helper = assist
             if (helper != null && fresh && current?.route == route && gps != null && phoneAnchorAt != locationAtMillis) {
                 val point = KNSDK.convertKATECToWGS84(gps.pos.x.roundToInt(), gps.pos.y.roundToInt())
-                val meters = current.distFromS.toDouble() / route.totalDist.coerceAtLeast(1) * helper.geometry.totalMeters
-                helper.anchor(GeoPoint(point.y, point.x), meters, locationAtMillis!!)
-                phoneAnchor = current; phoneAnchorMeters = meters
-                phoneAnchorAt = locationAtMillis
+                // Runs inside an SDK callback on the main thread: an invalid conversion skips the anchor, never crashes.
+                val wgs = runCatching { GeoPoint(point.y, point.x) }.getOrNull()
+                if (wgs != null) {
+                    val meters = current.distFromS.toDouble() / route.totalDist.coerceAtLeast(1) * helper.geometry.totalMeters
+                    helper.anchor(wgs, meters, locationAtMillis!!)
+                    phoneAnchor = current; phoneAnchorMeters = meters
+                    phoneAnchorAt = locationAtMillis
+                }
             }
             if (!fresh && helper != null) {
                 val now = SystemClock.elapsedRealtime()

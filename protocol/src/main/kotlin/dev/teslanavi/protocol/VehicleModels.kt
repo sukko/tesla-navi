@@ -67,9 +67,10 @@ data class DriveSnapshot(
     companion object {
         fun from(state: DriveState, location: LocationState? = null): DriveSnapshot {
             val name = state.activeRouteDestination.trim().takeIf { it.isNotEmpty() }
+            // A NaN or out-of-range coordinate must not fail the whole drive read; it reads as "no point".
             val point = if (state.hasActiveRouteCoordinates()) {
                 val coords = state.activeRouteCoordinates
-                GeoPoint(coords.latitude.toDouble(), coords.longitude.toDouble())
+                runCatching { GeoPoint(coords.latitude.toDouble(), coords.longitude.toDouble()) }.getOrNull()
             } else null
             val destination = if (name == null && point == null) NavigationDestination.None
                 else NavigationDestination.Active(name, point)

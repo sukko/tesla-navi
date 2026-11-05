@@ -184,6 +184,16 @@ class ProtocolTest {
         assertEquals(NavigationDestination.None, DriveSnapshot.from(DriveState.getDefaultInstance()).destination)
     }
 
+    @Test fun `invalid destination coordinates keep the drive read and the destination name`() {
+        for ((lat, lon) in listOf(Float.NaN to 126.9f, 91f to 126.9f, 37.5f to 181f, 37.5f to Float.POSITIVE_INFINITY)) {
+            val state = DriveState.newBuilder().setActiveRouteDestination("서울역")
+                .setActiveRouteCoordinates(LatLong.newBuilder().setLatitude(lat).setLongitude(lon)).build()
+            assertEquals(NavigationDestination.Active("서울역", null), DriveSnapshot.from(state).destination)
+        }
+        val unnamed = DriveState.newBuilder().setActiveRouteCoordinates(LatLong.newBuilder().setLatitude(Float.NaN).setLongitude(0f)).build()
+        assertEquals(NavigationDestination.None, DriveSnapshot.from(unnamed).destination)
+    }
+
     @Test fun `key enrollment requests monitor role and never marks transmission as approval`() = runTest {
         val keys = TeslaKeys.generate()
         val transport = FakeVehicle(keys)

@@ -101,7 +101,9 @@ class AndroidBleTransport private constructor(private val context: Context) : Ve
                 if (!incoming.trySend(message).isSuccess) throw IOException("차량 응답 처리가 지연되었습니다. 다시 연결해 주세요.")
             }
         } catch (error: Exception) {
-            fail(error)
+            // The channel rethrows this cause to the reader. A corrupt frame is a link fault to reconnect from,
+            // not IllegalArgumentException, which DriveController treats as terminal.
+            fail(error as? IOException ?: IOException("차량 응답 형식 오류 · 다시 연결합니다. (${error.message})", error))
             gatt?.disconnect()
         }
     }

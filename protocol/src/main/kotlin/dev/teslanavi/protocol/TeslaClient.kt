@@ -100,7 +100,8 @@ class TeslaClient(private val vin: String, private val keys: KeyPair, private va
         val startedAt = System.nanoTime()
         transport.send(request.toByteArray())
         val reply = awaitReply(request, 4000) { !it.sessionInfo.isEmpty }
-        require((System.nanoTime() - startedAt) < 4_000_000_000L) { "차량 인증 응답이 지연되었습니다. 다시 연결해 주세요." }
+        // check, not require: a late reply is as retryable as a timeout. IllegalArgumentException ends the session.
+        check((System.nanoTime() - startedAt) < 4_000_000_000L) { "차량 인증 응답이 지연되었습니다. 다시 연결해 주세요." }
         require(reply.signatureData.hasSessionInfoTag()) { "차량 인증 서명이 누락되었습니다." }
         session = TeslaSession.authenticate(vin, keys, request.uuid.toByteArray(),
             reply.sessionInfo.toByteArray(), reply.signatureData.sessionInfoTag.tag.toByteArray())
