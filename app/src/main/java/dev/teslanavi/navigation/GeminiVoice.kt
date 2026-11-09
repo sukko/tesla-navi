@@ -7,6 +7,7 @@ import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import java.io.File
 import java.security.MessageDigest
+import java.util.concurrent.atomic.AtomicBoolean
 
 /** Whole-phrase disk cache and coalesced, bounded cloud work; driving falls back promptly when cloud audio is late. */
 class GeminiVoice(
@@ -17,6 +18,8 @@ class GeminiVoice(
     private val waitMillis: Long = 2500,
     private val speaker: () -> GeminiSpeaker = { GeminiSpeaker.Kore },
     val usage: GeminiTtsUsage = GeminiTtsUsage(),
+    /** Outside the phrase cache, whose size limit and system cache clearing must not remove the fallback. */
+    private val fallbackDir: File = File(cacheDir, "fallback"),
 ) : PcmVoice {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val gate = Semaphore(1)
@@ -37,7 +40,34 @@ class GeminiVoice(
         override suspend fun load() = this@GeminiVoice.load()
         override fun render(text: String, done: (Pcm?) -> Unit) = renderWithin(text, 15_000, done)
         override fun prefetch(text: String) = this@GeminiVoice.prefetch(text)
+        override fun prepareFallback() = this@GeminiVoice.prepareFallback()
+        override fun fallback() = this@GeminiVoice.fallback()
     }
+
+    private val fallbackPreparing = AtomicBoolean(false)
+    @Volatile private var fallbackSavedFor: GeminiSpeaker? = null
+    private fun fallbackFile(voice: GeminiSpeaker) = File(fallbackDir, "camera-${voice.name}.pcm")
+
+    /** Costs one request per voice, once. A failure is retried at the next preparation. */
+    override fun prepareFallback() {
+        val voice = speaker()
+        if (!ready || fallbackSavedFor == voice || !fallbackPreparing.compareAndSet(false, true)) return
+        val token = generation
+        scope.launch {
+            try {
+                val file = fallbackFile(voice)
+                if (readCache(file) == null) {
+                    val pcm = request(STORED_CAMERA_PHRASE, urgent = false, token)?.await() ?: return@launch
+                    synchronized(lock) { writePcm(file, pcm) }
+                }
+                fallbackSavedFor = voice
+            } catch (_: Exception) { /* Includes cancellation by reset(); the next preparation retries. */ }
+            finally { fallbackPreparing.set(false) }
+        }
+    }
+
+    /** The current voice first; another voice's recording is better than no words at all. */
+    override fun fallback(): Pcm? = (listOf(speaker()) + GeminiSpeaker.entries).firstNotNullOfOrNull { readCache(fallbackFile(it)) }
 
     override fun render(text: String, done: (Pcm?) -> Unit) = renderWithin(text, waitMillis, done)
 
@@ -47,7 +77,7 @@ class GeminiVoice(
             val pcm = try { withTimeoutOrNull(timeout) { request(text, urgent = true, token)?.await() } }
                 catch (_: CancellationException) { null }
             if (pcm == null && generation == token && mutable.value == null)
-                mutable.value = "Gemini 응답을 기다리는 중입니다. 이번 안내는 기본 음성으로 재생합니다."
+                mutable.value = "Gemini 응답을 기다리는 중입니다. 이번 안내는 저장된 안내로 재생합니다."
             done(pcm.takeIf { generation == token })
         }
     }
@@ -99,7 +129,7 @@ class GeminiVoice(
                         val ticket = usage.acquire()
                         if (ticket == null) {
                             if (generation == token) mutable.value = usage.state.value.error
-                                ?: "Gemini 새 음성 생성 한도 대기 중 · 캐시 또는 기본 음성으로 안내합니다."
+                                ?: "Gemini 새 음성 생성 한도 대기 중 · 캐시 또는 저장된 안내로 재생합니다."
                             return@withPermit null
                         }
                         currentCoroutineContext().ensureActive()
@@ -126,7 +156,7 @@ class GeminiVoice(
                         if (generation == token) {
                             retryAfter = clock() + 60_000
                             mutable.value = (error as? GeminiTtsFailure)?.safeMessage
-                                ?: "Gemini에 연결하지 못했습니다. 기본 음성으로 안내합니다."
+                                ?: "Gemini에 연결하지 못했습니다. 저장된 안내로 재생합니다."
                         }
                     }
                     null
@@ -169,8 +199,17 @@ class GeminiVoice(
     }.getOrNull()
 
     private fun writeCache(file: File, pcm: Pcm) {
+        writePcm(file, pcm)
+        var size = 0L
+        cacheDir.listFiles()?.filter { it.extension == "pcm" }?.sortedByDescending { it.lastModified() }?.forEachIndexed { i, cached ->
+            size += cached.length()
+            if (i >= 32 || size > 16_000_000) cached.delete()
+        }
+    }
+
+    private fun writePcm(file: File, pcm: Pcm) {
         require(pcm.sampleRate in 8000..96000 && pcm.bytes.size % 2 == 0 && pcm.millis in 100..45_000)
-        cacheDir.mkdirs()
+        file.parentFile?.mkdirs()
         val atomic = android.util.AtomicFile(file)
         val stream = atomic.startWrite()
         try {
@@ -178,10 +217,5 @@ class GeminiVoice(
             output.writeInt(pcm.sampleRate); output.write(pcm.bytes); output.flush()
             atomic.finishWrite(stream)
         } catch (error: Throwable) { atomic.failWrite(stream); throw error }
-        var size = 0L
-        cacheDir.listFiles()?.filter { it.extension == "pcm" }?.sortedByDescending { it.lastModified() }?.forEachIndexed { i, cached ->
-            size += cached.length()
-            if (i >= 32 || size > 16_000_000) cached.delete()
-        }
     }
 }

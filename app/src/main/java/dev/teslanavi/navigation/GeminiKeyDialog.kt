@@ -36,7 +36,7 @@ internal fun GeminiKeyDialog(hasKey: Boolean, onSave: (String) -> String?, onDel
                     isError = error != null)
                 error?.let { Text(it, maxLines = 8) }
                 Text("무료 사용량은 프로젝트별로 제한됩니다. 무료로만 쓰려면 결제 계정을 연결하지 말고 Free tier 상태를 확인하세요.", maxLines = 8)
-                Text("안내 문장을 Google로 전송합니다. 무료 구간의 입력·출력은 서비스 개선에 사용될 수 있습니다. 연결 실패·한도 초과 시 기본 음성으로 안내합니다.", maxLines = 8)
+                Text("안내 문장을 Google로 전송합니다. 무료 구간의 입력·출력은 서비스 개선에 사용될 수 있습니다. 연결 실패·한도 초과 시 저장된 안내로 재생합니다.", maxLines = 8)
                 TextButton(onClick = { runCatching { links.openUri("https://aistudio.google.com/apikey") } }) { Text("Google AI Studio에서 키 만들기", maxLines = 2) }
                 if (hasKey) TextButton(onClick = { onDelete(); onDismiss() }) { Text("저장된 키 삭제", maxLines = 1) }
             }

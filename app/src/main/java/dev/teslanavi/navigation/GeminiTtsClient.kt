@@ -37,10 +37,10 @@ class GeminiTtsClient(private val connect: (GeminiTtsModel) -> HttpURLConnection
                 val quota = if (status == 429) quotaFailure(connection) else false to 60_000L
                 android.util.Log.i("TeslaNaviAudio", "Gemini response model=${model.id} status=$status dailyQuota=${quota.first}")
                 throw GeminiTtsFailure(status, when (status) {
-                401, 403 -> "Gemini 키 또는 프로젝트 권한을 확인해 주세요. 기본 음성으로 안내합니다."
-                429 -> "Gemini 사용 한도에 도달했습니다. 잠시 기본 음성으로 안내합니다."
-                404 -> "Gemini 음성 모델을 사용할 수 없습니다. 기본 음성으로 안내합니다."
-                else -> "Gemini 요청에 실패했습니다($status). 기본 음성으로 안내합니다."
+                401, 403 -> "Gemini 키 또는 프로젝트 권한을 확인해 주세요. 저장된 안내로 재생합니다."
+                429 -> "Gemini 사용 한도에 도달했습니다. 잠시 저장된 안내로 재생합니다."
+                404 -> "Gemini 음성 모델을 사용할 수 없습니다. 저장된 안내로 재생합니다."
+                else -> "Gemini 요청에 실패했습니다($status). 저장된 안내로 재생합니다."
                 }, quota.first, quota.second)
             }
             val bytes = connection.inputStream.use { it.readBytesLimited(8_000_000) }

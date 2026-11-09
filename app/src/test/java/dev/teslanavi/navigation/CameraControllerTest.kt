@@ -53,6 +53,59 @@ class CameraControllerTest {
         job.cancelAndJoin()
     }
 
+    /** 2026-11-09 19:52: a 60 km/h camera seen about 1 km ahead, then no fresh position until it was passed. */
+    @Test fun cameraSeenAheadIsAnnouncedByEstimatedDistanceWhenPositionsStop() = runTest {
+        val engine = FakeNavigationEngine()
+        val speaker = FakeSpeaker()
+        val log = mutableListOf<String>()
+        val controller = CameraController(engine, speaker, onContinuation = { log += it }) { testScheduler.currentTime }
+        val job = backgroundScope.launch { controller.run("key", MutableStateFlow(connected())) }
+        runCurrent()
+        engine.frame(listOf(camera.copy(distanceMeters = 1000)), testScheduler.currentTime, speed = 72); runCurrent()
+        assertTrue(speaker.spoken.isEmpty())
+        advanceTimeBy(20_000); runCurrent()
+        assertTrue("still beyond the 500 m alert distance", speaker.spoken.isEmpty())
+        advanceTimeBy(6_000); runCurrent()
+        assertEquals(1, speaker.spoken.size)
+        assertTrue(speaker.spoken.single().contains("카메라가 있습니다"))
+        assertTrue(log.any { it.contains("추정 거리") })
+        advanceTimeBy(30_000); runCurrent()
+        assertEquals("announced once", 1, speaker.spoken.size)
+        job.cancelAndJoin()
+    }
+
+    @Test fun cameraDroppedByARouteResetIsStillAnnouncedFromFreshFrames() = runTest {
+        val engine = FakeNavigationEngine()
+        val speaker = FakeSpeaker()
+        val log = mutableListOf<String>()
+        val controller = CameraController(engine, speaker, onContinuation = { log += it }) { testScheduler.currentTime }
+        val job = backgroundScope.launch { controller.run("key", MutableStateFlow(connected())) }
+        runCurrent()
+        engine.frame(listOf(camera.copy(distanceMeters = 700)), testScheduler.currentTime, speed = 72); runCurrent()
+        engine.events.tryEmit(NavigationUpdate(engine.revision, NavigationEvent.RouteInvalidated("경로 이탈 · 카카오 경로를 다시 탐색합니다"))); runCurrent()
+        assertTrue(log.any { it.contains("경로 이탈") })
+        repeat(12) {
+            advanceTimeBy(1000); runCurrent()
+            engine.frame(emptyList(), testScheduler.currentTime, speed = 72); runCurrent()
+        }
+        assertEquals(1, speaker.spoken.size)
+        job.cancelAndJoin()
+    }
+
+    @Test fun cameraPassedWithoutAnnouncementIsRecorded() = runTest {
+        val engine = FakeNavigationEngine()
+        val speaker = FakeSpeaker().apply { acceptsAudio = false }
+        val log = mutableListOf<String>()
+        val controller = CameraController(engine, speaker, onContinuation = { log += it }) { testScheduler.currentTime }
+        val job = backgroundScope.launch { controller.run("key", MutableStateFlow(connected())) }
+        runCurrent()
+        engine.frame(listOf(camera.copy(distanceMeters = 100)), testScheduler.currentTime, speed = 36); runCurrent()
+        advanceTimeBy(1000); runCurrent()
+        engine.frame(emptyList(), testScheduler.currentTime, speed = 36); runCurrent()
+        assertTrue(log.any { it.startsWith("안내 없이 카메라 통과 추정") && it.contains("PHONE") })
+        job.cancelAndJoin()
+    }
+
     @Test fun vehicleFixIsForwardedOncePerSnapshotAndClearedOnDisconnection() = runTest {
         val engine = FakeNavigationEngine()
         val speaker = FakeSpeaker()

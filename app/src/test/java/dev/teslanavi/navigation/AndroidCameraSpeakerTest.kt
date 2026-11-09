@@ -27,30 +27,76 @@ import java.io.File
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34], application = TeslaNaviApp::class, shadows = [ControlledSpeech::class])
 class AndroidCameraSpeakerTest {
-    @Test fun geminiSelectionUsesCloudVoiceWithoutStartupRequestsAndFallsBackToPhoneVoice() = runTest {
+    @Test fun geminiSelectionUsesCloudVoiceAndOnlyPreparesTheStoredPhraseAtStartup() = runTest {
         val context = ApplicationProvider.getApplicationContext<TeslaNaviApp>()
         shadowOf(context.getSystemService(AudioManager::class.java))
             .setNextFocusRequestResponse(AudioManager.AUDIOFOCUS_REQUEST_GRANTED)
-        ShadowTextToSpeech.addLanguageAvailability(Locale.KOREAN)
         val cloud = FakePcmVoice()
         val speaker = AndroidCameraSpeaker(context, cloud) { GuidanceVoice.GEMINI }
-        val initialization = async(start = CoroutineStart.UNDISPATCHED) { speaker.initialize() }
-        val speech = shadowOf(ShadowTextToSpeech.getLastTextToSpeechInstance()) as ControlledSpeech
-        speech.onInitListener.onInit(TextToSpeech.SUCCESS)
-        assertNull(initialization.await())
+        assertNull(speaker.initialize())
         try {
             assertTrue(cloud.ready)
-            assertTrue("cloud requests must not start just from initialization", cloud.prefetched.isEmpty())
+            assertEquals(1, cloud.fallbackPreparations)
+            assertTrue("guidance requests must not start just from initialization", cloud.prefetched.isEmpty())
             assertTrue(speaker.speak("300미터 앞"))
             shadowOf(Looper.getMainLooper()).idle()
             assertEquals(listOf("삼백 미터 앞"), cloud.rendered)
             assertNotNull(voiceTrackOf(speaker))
-            assertNull(speech.lastId)
-            shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(1500))
-            cloud.pcm = null
-            assertTrue(speaker.speak("500미터 앞"))
+        } finally { speaker.close() }
+    }
+
+    @Test fun failedCameraAnnouncementPlaysStoredPhraseNeverThePhoneVoice() = runTest {
+        val context = ApplicationProvider.getApplicationContext<TeslaNaviApp>()
+        shadowOf(context.getSystemService(AudioManager::class.java)).setNextFocusRequestResponse(AudioManager.AUDIOFOCUS_REQUEST_GRANTED)
+        val stored = Pcm(ByteArray(2 * 9_600), 24_000)
+        val cloud = FakePcmVoice().apply { pcm = null; storedPcm = stored }
+        val speaker = AndroidCameraSpeaker(context, cloud, playbackSpeed = { 1.25f }) { GuidanceVoice.GEMINI }
+        assertNull(speaker.initialize())
+        try {
+            val results = mutableListOf<Boolean>()
+            assertTrue(speaker.speak("300미터 앞 과속 단속 카메라가 있습니다.") { results += it })
             shadowOf(Looper.getMainLooper()).idle()
-            assertEquals("오백 미터 앞", speech.lastText)
+            val output = checkNotNull(voiceTrackOf(speaker))
+            assertEquals(24_000, output.sampleRate)
+            assertEquals(1.25f, output.playbackParams.speed, .001f)
+            shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(stored.millis + 1001))
+            assertEquals("completion suppresses a repeat for the same camera", listOf(true), results)
+        } finally { speaker.close() }
+    }
+
+    @Test fun cameraAnnouncementWithoutAStoredPhrasePlaysTheChime() = runTest {
+        val context = ApplicationProvider.getApplicationContext<TeslaNaviApp>()
+        shadowOf(context.getSystemService(AudioManager::class.java)).setNextFocusRequestResponse(AudioManager.AUDIOFOCUS_REQUEST_GRANTED)
+        val cloud = FakePcmVoice(loadError = "Gemini API 키를 먼저 등록해 주세요.").apply { pcm = null }
+        val speaker = AndroidCameraSpeaker(context, cloud) { GuidanceVoice.GEMINI }
+        assertNull(speaker.initialize())
+        try {
+            val results = mutableListOf<Boolean>()
+            assertTrue(speaker.speak("500미터 앞 과속 단속 카메라가 있습니다.") { results += it })
+            shadowOf(Looper.getMainLooper()).idle()
+            assertEquals(WarningChime.SAMPLE_RATE, checkNotNull(voiceTrackOf(speaker)).sampleRate)
+            shadowOf(Looper.getMainLooper()).idleFor(Duration.ofSeconds(5))
+            assertEquals(listOf(true), results)
+        } finally { speaker.close() }
+    }
+
+    @Test fun otherSpeechNeverBecomesAFalseCameraWarningWhenGeminiFails() = runTest {
+        val context = ApplicationProvider.getApplicationContext<TeslaNaviApp>()
+        shadowOf(context.getSystemService(AudioManager::class.java)).setNextFocusRequestResponse(AudioManager.AUDIOFOCUS_REQUEST_GRANTED)
+        val cloud = FakePcmVoice().apply { pcm = null; storedPcm = Pcm(ByteArray(9_600), 24_000) }
+        val speaker = AndroidCameraSpeaker(context, cloud) { GuidanceVoice.GEMINI }
+        assertNull(speaker.initialize())
+        try {
+            val results = mutableListOf<Boolean>()
+            assertTrue(speaker.speak("제한속도 60킬로미터 초과입니다.") { results += it })
+            shadowOf(Looper.getMainLooper()).idle()
+            assertNull(voiceTrackOf(speaker))
+            assertEquals(listOf(false), results)
+            shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(2000))
+            assertTrue(speaker.speak("주행시작") { results += it })
+            shadowOf(Looper.getMainLooper()).idle()
+            assertNull(voiceTrackOf(speaker))
+            assertEquals(listOf(false, false), results)
         } finally { speaker.close() }
     }
 
@@ -60,10 +106,7 @@ class AndroidCameraSpeakerTest {
         ShadowTextToSpeech.addLanguageAvailability(Locale.KOREAN)
         val voice = FakePcmVoice().apply { pcm = Pcm(ByteArray(480_000), 24_000) }
         val speaker = AndroidCameraSpeaker(context, voice, playbackSpeed = { 1.25f }) { GuidanceVoice.GEMINI }
-        val initialization = async(start = CoroutineStart.UNDISPATCHED) { speaker.initialize() }
-        val speech = shadowOf(ShadowTextToSpeech.getLastTextToSpeechInstance()) as ControlledSpeech
-        speech.onInitListener.onInit(TextToSpeech.SUCCESS)
-        assertNull(initialization.await())
+        assertNull(speaker.initialize())
         try {
             val results = mutableListOf<Boolean>()
             speaker.speak("카메라 안내") { results += it }
@@ -162,9 +205,7 @@ class AndroidCameraSpeakerTest {
         var preferred = GuidanceVoice.GEMINI
         val voice = FakePcmVoice()
         val speaker = AndroidCameraSpeaker(context, voice) { preferred }
-        val initialization = async(start = CoroutineStart.UNDISPATCHED) { speaker.initialize() }
-        (shadowOf(ShadowTextToSpeech.getLastTextToSpeechInstance()) as ControlledSpeech).onInitListener.onInit(TextToSpeech.ERROR)
-        assertNull(initialization.await())
+        assertNull(speaker.initialize())
         try {
             assertFalse(speaker.needsInitialization)
             preferred = GuidanceVoice.SYSTEM
@@ -180,17 +221,13 @@ class AndroidCameraSpeakerTest {
             assertTrue(voice.rendered.isEmpty())
         } finally { speaker.close() }
     }
-    @Test fun neuralCompletionAndFailedSystemFallbackAreReportedAfterPlayback() = runTest {
+    @Test fun neuralCompletionAndFailureAreReportedAfterPlayback() = runTest {
         val context = ApplicationProvider.getApplicationContext<TeslaNaviApp>()
         shadowOf(context.getSystemService(AudioManager::class.java))
             .setNextFocusRequestResponse(AudioManager.AUDIOFOCUS_REQUEST_GRANTED)
-        ShadowTextToSpeech.addLanguageAvailability(Locale.KOREAN)
         val voice = FakePcmVoice().apply { pcm = Pcm(ByteArray(2 * 24_000 * 10), 24_000) }
         val speaker = AndroidCameraSpeaker(context, voice) { GuidanceVoice.GEMINI }
-        val initialization = async(start = CoroutineStart.UNDISPATCHED) { speaker.initialize() }
-        val speech = shadowOf(ShadowTextToSpeech.getLastTextToSpeechInstance()) as ControlledSpeech
-        speech.onInitListener.onInit(TextToSpeech.SUCCESS)
-        assertNull(initialization.await())
+        assertNull(speaker.initialize())
         try {
             val results = mutableListOf<Boolean>()
             assertTrue(speaker.speak("카메라 안내") { results += it })
@@ -204,13 +241,9 @@ class AndroidCameraSpeakerTest {
             assertEquals(listOf(true), results)
             assertNull(voiceTrackOf(speaker))
             voice.pcm = null
-            assertTrue(speaker.speak("다음 카메라") { results += it })
-            shadowOf(Looper.getMainLooper()).idle()
-            assertEquals(listOf(true), results)
-            speech.utteranceProgressListener.onError(speech.lastId, TextToSpeech.ERROR_OUTPUT)
+            assertTrue(speaker.speak("다음 안내") { results += it })
             shadowOf(Looper.getMainLooper()).idle()
             assertEquals(listOf(true, false), results)
-            assertTrue(speaker.needsInitialization)
         } finally { speaker.close() }
     }
 
@@ -221,10 +254,7 @@ class AndroidCameraSpeakerTest {
         ShadowTextToSpeech.addLanguageAvailability(Locale.KOREAN)
         val voice = FakePcmVoice().apply { defer = true }
         val speaker = AndroidCameraSpeaker(context, voice) { GuidanceVoice.GEMINI }
-        val initialization = async(start = CoroutineStart.UNDISPATCHED) { speaker.initialize() }
-        val speech = shadowOf(ShadowTextToSpeech.getLastTextToSpeechInstance()) as ControlledSpeech
-        speech.onInitListener.onInit(TextToSpeech.SUCCESS)
-        assertNull(initialization.await())
+        assertNull(speaker.initialize())
         try {
             val results = mutableListOf<Boolean>()
             speaker.speak("카메라 안내") { results += it }
@@ -324,62 +354,45 @@ class AndroidCameraSpeakerTest {
         } finally { speaker.close() }
     }
 
-    @Test fun selectedNeuralVoicePlaysPcmAndFallsBackToSystemVoiceWhenRenderingFails() = runTest {
+    @Test fun selectedNeuralVoicePlaysPcmAndPreparesUpcomingSpeech() = runTest {
         val context = ApplicationProvider.getApplicationContext<TeslaNaviApp>()
         shadowOf(context.getSystemService(AudioManager::class.java))
             .setNextFocusRequestResponse(AudioManager.AUDIOFOCUS_REQUEST_GRANTED)
-        ShadowTextToSpeech.addLanguageAvailability(Locale.KOREAN)
         val voice = FakePcmVoice()
         val speaker = AndroidCameraSpeaker(context, voice) { GuidanceVoice.GEMINI }
-        val initialization = async(start = CoroutineStart.UNDISPATCHED) { speaker.initialize() }
-        val speech = shadowOf(ShadowTextToSpeech.getLastTextToSpeechInstance()) as ControlledSpeech
-        speech.onInitListener.onInit(TextToSpeech.SUCCESS)
-        assertNull(initialization.await())
+        assertNull(speaker.initialize())
         assertTrue(voice.prefetched.isEmpty())
         try {
             assertTrue(speaker.speak("300미터 앞 과속 단속 카메라가 있습니다."))
             shadowOf(Looper.getMainLooper()).idle()
             val output = checkNotNull(voiceTrackOf(speaker))
             assertEquals(AudioTrack.PLAYSTATE_PLAYING, output.playState)
-            assertNull("system TTS stays silent", speech.lastId)
             assertFalse(speaker.speak("겹치는 안내"))
             speaker.prefetch("제한속도 60킬로미터 초과입니다.")
             assertEquals("제한속도 육십 킬로미터 초과입니다.", voice.prefetched.last())
+            assertEquals("a phrase that failed at startup is retried", 2, voice.fallbackPreparations)
             shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(voice.pcm!!.millis + 1001))
             assertNull(voiceTrackOf(speaker))
-            voice.pcm = null
-            assertTrue(speaker.speak("제한속도 60킬로미터 초과입니다."))
-            shadowOf(Looper.getMainLooper()).idle()
-            assertNotNull("fallback used the phone voice", speech.lastId)
-            assertNull(voiceTrackOf(speaker))
-            assertFalse(speaker.speak("겹치는 안내"))
-            speech.utteranceProgressListener.onDone(speech.lastId)
-            shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(1500))
-            shadowOf(Looper.getMainLooper()).idle()
-            shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(2000))
-            assertTrue(speaker.speak("다음 안내"))
         } finally { speaker.close() }
     }
 
-    @Test fun systemVoiceSelectionOrUnavailableCloudKeepsPhoneVoice() = runTest {
+    @Test fun userSelectedSystemVoiceKeepsThePhoneVoice() = runTest {
         val context = ApplicationProvider.getApplicationContext<TeslaNaviApp>()
         shadowOf(context.getSystemService(AudioManager::class.java))
             .setNextFocusRequestResponse(AudioManager.AUDIOFOCUS_REQUEST_GRANTED)
         ShadowTextToSpeech.addLanguageAvailability(Locale.KOREAN)
-        listOf(FakePcmVoice() to GuidanceVoice.SYSTEM,
-            FakePcmVoice(loadError = "Gemini API 키를 먼저 등록해 주세요.") to GuidanceVoice.GEMINI).forEach { (voice, choice) ->
-            val speaker = AndroidCameraSpeaker(context, voice) { choice }
-            val initialization = async(start = CoroutineStart.UNDISPATCHED) { speaker.initialize() }
-            val speech = shadowOf(ShadowTextToSpeech.getLastTextToSpeechInstance()) as ControlledSpeech
-            speech.onInitListener.onInit(TextToSpeech.SUCCESS)
-            assertNull(initialization.await())
-            try {
-                assertTrue(speaker.speak("카메라가 있습니다"))
-                assertNotNull(speech.lastId)
-                assertTrue(voice.rendered.isEmpty())
-                assertNull(voiceTrackOf(speaker))
-            } finally { speaker.close() }
-        }
+        val voice = FakePcmVoice()
+        val speaker = AndroidCameraSpeaker(context, voice) { GuidanceVoice.SYSTEM }
+        val initialization = async(start = CoroutineStart.UNDISPATCHED) { speaker.initialize() }
+        val speech = shadowOf(ShadowTextToSpeech.getLastTextToSpeechInstance()) as ControlledSpeech
+        speech.onInitListener.onInit(TextToSpeech.SUCCESS)
+        assertNull(initialization.await())
+        try {
+            assertTrue(speaker.speak("카메라가 있습니다"))
+            assertNotNull(speech.lastId)
+            assertTrue(voice.rendered.isEmpty())
+            assertNull(voiceTrackOf(speaker))
+        } finally { speaker.close() }
     }
 
     @Test fun asynchronousErrorReportsFailureAndReinitializationPreservesChime() = runTest {
@@ -451,6 +464,10 @@ private class FakePcmVoice(private val loadError: String? = null) : PcmVoice {
     var pcm: Pcm? = Pcm(ByteArray(2 * 4_800), 24_000)
     val rendered = mutableListOf<String>()
     val prefetched = mutableListOf<String>()
+    var storedPcm: Pcm? = null
+    var fallbackPreparations = 0
+    override fun prepareFallback() { fallbackPreparations++ }
+    override fun fallback() = storedPcm
     override var ready = false
     override suspend fun load(): String? { ready = loadError == null; return loadError }
     override fun render(text: String, done: (Pcm?) -> Unit) { rendered += text; if (defer) pending = done else done(pcm) }

@@ -64,7 +64,7 @@ fun GuidanceVoiceChoice(selected: GuidanceVoice, onSelect: (GuidanceVoice) -> Un
             OutlinedButton(onClick = { showGemini = true }, modifier = Modifier.fillMaxWidth()) {
                 Text(if (geminiKey.hasKey) "Gemini 키 변경" else "Gemini API 키 등록")
             }
-            Text("반복 안내는 저장한 음성으로 재생 · 연결 실패 시 기본 음성 사용", fontSize = 13.sp, color = Hint)
+            Text("반복 안내는 저장한 음성으로 재생 · 연결 실패 시 저장된 '전방에 과속 카메라가 있습니다' 재생", fontSize = 13.sp, color = Hint)
             (geminiKey.error ?: geminiStatus)?.let { Text(it, fontSize = 13.sp, color = Hint) }
         }
         Column(Modifier.padding(start = OptionIndent), verticalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -76,7 +76,7 @@ fun GuidanceVoiceChoice(selected: GuidanceVoice, onSelect: (GuidanceVoice) -> Un
                 valueRange = 80f..150f, steps = 13, enabled = geminiKey.hasKey,
                 modifier = Modifier.semantics { contentDescription = "Gemini 말하기 속도" })
             Text("목소리 높이를 유지하며 재생 속도 조절 · 아래 카메라 음성 테스트로 확인", fontSize = 13.sp, color = Hint)
-            Text("처음 만드는 음성은 시간이 걸릴 수 있습니다. 주행 중 응답이 늦으면 기본 음성으로 먼저 안내합니다.", fontSize = 13.sp, color = Hint)
+            Text("처음 만드는 음성은 시간이 걸릴 수 있습니다. 주행 중 응답이 늦으면 저장된 안내로 먼저 재생합니다.", fontSize = 13.sp, color = Hint)
         }
     }
     if (showGemini) GeminiKeyDialog(geminiKey.hasKey, onSaveGemini, onDeleteGemini) { showGemini = false }

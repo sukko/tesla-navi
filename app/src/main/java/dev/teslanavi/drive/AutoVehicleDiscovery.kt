@@ -12,10 +12,14 @@ class AutoVehicleDiscovery {
         gates.keys.retainAll(eligible)
     }
     val scanNames: Set<String> get() = names.keys
-    fun canWake(name: String?, rssi: Int, connectable: Boolean) = name in names && connectable && rssi >= ProximityGate.MIN_RSSI
-    fun observe(name: String?, rssi: Int, connectable: Boolean, now: Long, busy: Boolean): String? {
+    internal fun scanNames(allowance: ConnectionAllowance): Set<String> = names.filterValues(allowance::permits).keys
+    internal fun canWake(name: String?, rssi: Int, connectable: Boolean, allowance: ConnectionAllowance = ConnectionAllowance(true)) =
+        names[name]?.let(allowance::permits) == true && connectable && rssi >= ProximityGate.MIN_RSSI
+    /** A sighting of a car that may not connect still counts as presence for its departure detection. */
+    internal fun observe(name: String?, rssi: Int, connectable: Boolean, now: Long, busy: Boolean,
+        allowance: ConnectionAllowance = ConnectionAllowance(true)): String? {
         val vin = names[name] ?: return null
-        return vin.takeIf { gates.getOrPut(vin) { ProximityGate() }.observe(rssi, connectable, now, canAttempt = !busy) }
+        return vin.takeIf { gates.getOrPut(vin) { ProximityGate() }.observe(rssi, connectable, now, canAttempt = !busy && allowance.permits(vin)) }
     }
     fun awaitDeparture(vin: String, now: Long) { gates.getOrPut(vin) { ProximityGate() }.awaitDeparture(now) }
     fun reset() { names = emptyMap(); gates.clear() }

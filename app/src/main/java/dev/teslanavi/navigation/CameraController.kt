@@ -26,6 +26,54 @@ class CameraController(
     private var acceptingFrames = false
     private var audioGeneration = 0L
     private var tripSpeech: Any? = null
+    private val reckoning = CameraDeadReckoning()
+    private var lastFreshAt: Long? = null
+    private var lastRoad = RoadClass.UNKNOWN
+    private var lastSpeedKph: Double? = null
+    private var lastSpeedAt: Long? = null
+    private var lastRouteMessage: String? = null
+
+    /** Estimated cameras are announced only after this long without a fresh frame; frames otherwise arrive each second. */
+    private val estimateAfterMillis = 3_000L
+
+    /** Records why a camera passed without an announcement, so the next missed camera can be explained. */
+    private fun reportPassed(passed: CameraDeadReckoning.Passed) {
+        if (policy.wasAnnounced(passed.reading.id) || _state.value.muted) return
+        val camera = passed.reading
+        val freshAge = lastFreshAt?.let { "${(clock() - it) / 1000}초 전" } ?: "없음"
+        onContinuation("안내 없이 카메라 통과 추정 · ${camera.kind.label} ${camera.speedLimitKph ?: "-"} km/h · " +
+            "마지막 확인 약 ${passed.lastMeters} m · ${passed.ageMillis / 1000}초 전 · ${passed.source} · " +
+            "최근 위치 $freshAge · ${_state.value.phase} · ${_state.value.mode ?: "모드 없음"}" +
+            (_state.value.voiceError?.let { " · 음성 $it" } ?: ""))
+    }
+
+    private fun recentSpeed(drive: DriveState, now: Long): Double? {
+        val car = drive.takeIf { it.phase == DrivePhase.CONNECTED &&
+            it.updatedAt?.let { time -> System.currentTimeMillis() - time in 0..10_000 } == true }
+            ?.snapshot?.speedKph?.takeIf { it.isFinite() && it >= 0 }
+        return car ?: lastSpeedKph?.takeIf { lastSpeedAt?.let { now - it in 0..30_000 } == true }
+    }
+
+    /** Each tick: carry seen cameras forward and announce one that reached the alert distance without fresh frames. */
+    private fun announceEstimated(drive: DriveState) {
+        val now = clock()
+        reckoning.advance(now, recentSpeed(drive, now))
+        reckoning.expire(now).forEach(::reportPassed)
+        val freshAge = lastFreshAt?.let { now - it } ?: return
+        if (freshAge < estimateAfterMillis || _state.value.muted || _state.value.voiceError != null) return
+        val camera = reckoning.estimated(now - estimateAfterMillis)
+            .firstOrNull { policy.next(it, lastRoad, now, settings.value) != null } ?: return
+        val announcement = policy.next(camera, lastRoad, now, settings.value) ?: return
+        // Same combined sentence as a fresh frame would give, so recovery does not split it in two.
+        val warning = overSpeedPolicy.next(camera, recentSpeed(drive, now), lastRoad, now, settings.value)
+        val generation = audioGeneration
+        if (speaker.speak(listOfNotNull(announcement.text, warning?.text).joinToString(" ")) { completed ->
+                if (completed && acceptingFrames && generation == audioGeneration) {
+                    policy.commit(announcement); warning?.let(overSpeedPolicy::commit)
+                }
+            }) onContinuation("위치 갱신 ${freshAge / 1000}초 없음 · 추정 거리 약 ${camera.distanceMeters} m로 카메라 안내 · " +
+                "${camera.kind.label} ${camera.speedLimitKph ?: "-"} km/h")
+    }
 
     fun configured(hasKey: Boolean) {
         _state.value = CameraState(phase = if (hasKey) CameraPhase.IDLE else CameraPhase.KEY_REQUIRED,
@@ -47,6 +95,7 @@ class CameraController(
         audioGeneration++
         tripSpeech = null
         acceptingFrames = false
+        reckoning.clear(); lastFreshAt = null
         overSpeedPolicy.clear()
         speaker.setOverSpeedAlert(false)
         speaker.silence()
@@ -112,8 +161,11 @@ class CameraController(
                                         currentSpeedKph = null, roadClass = RoadClass.UNKNOWN, overSpeed = false, overSpeedCamera = null) }
                                 }
                                 _state.update { it.copy(mode = event.mode, message = event.message) }
+                                if (event.message != lastRouteMessage) { lastRouteMessage = event.message; onContinuation("경로 · ${event.message}") }
                             }
                             is NavigationEvent.RouteInvalidated -> {
+                                // Cleared cameras keep their estimated distance; see CameraDeadReckoning.
+                                if (event.message != lastRouteMessage) { lastRouteMessage = event.message; onContinuation("경로 · ${event.message}") }
                                 audioGeneration++
                                 tripSpeech = null
                                 overSpeedPolicy.clear(); speaker.setOverSpeedAlert(false); speaker.silence()
@@ -137,6 +189,15 @@ class CameraController(
                                     ?.snapshot?.speedKph?.takeIf { it.isFinite() && it >= 0 }
                                 val speed = if (fresh) carSpeed ?: event.speedKph?.takeIf { it >= 0 }?.toDouble() else null
                                 val road = if (fresh) event.roadClass else RoadClass.UNKNOWN
+                                val frameAt = clock()
+                                // Cameras seen earlier but missing from this frame (route reset, list gap).
+                                val estimated = if (fresh) {
+                                    reckoning.advance(frameAt, speed)
+                                    lastFreshAt = frameAt; lastRoad = road
+                                    speed?.let { lastSpeedKph = it; lastSpeedAt = frameAt }
+                                    reckoning.observe(cameras, frameAt, event.source).forEach(::reportPassed)
+                                    reckoning.estimated(frameAt)
+                                } else emptyList()
                                 val speedCamera = cameras.firstOrNull { overSpeedPolicy.isOverSpeed(it, speed, road, settings.value) }
                                 val overSpeed = speedCamera != null
                                 if (fresh && event.source != _state.value.positionSource) onContinuation(
@@ -151,7 +212,8 @@ class CameraController(
                                 // Defer new announcements, but let already accepted speech finish.
                                 if (fresh && !_state.value.muted && _state.value.voiceError == null) {
                                     val now = clock()
-                                    val presence = cameras.firstNotNullOfOrNull { policy.next(it, road, now, settings.value) }
+                                    val presence = (cameras + estimated).sortedBy { it.distanceMeters }
+                                        .firstNotNullOfOrNull { policy.next(it, road, now, settings.value) }
                                     val speedWarning = overSpeedPolicy.next(speedCamera, speed, road, now, settings.value)
                                     val presenceWithWarning = presence?.takeIf {
                                         speedWarning == null || it.cameraId == speedCamera?.id
@@ -196,6 +258,7 @@ class CameraController(
                                         tripSpeech = null
                                     }
                                 }
+                                if (acceptingFrames) announceEstimated(drive.value)
                                 if (_state.value.locationAtMillis?.let { clock() - it > 10000 } == true) {
                                     speaker.setOverSpeedAlert(false)
                                     _state.update { it.copy(phase = CameraPhase.WAITING_GPS, cameras = emptyList(),

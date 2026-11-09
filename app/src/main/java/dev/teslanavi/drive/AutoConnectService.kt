@@ -106,31 +106,46 @@ class AutoConnectService : Service() {
                     }
                 }
             }
+            launch {
+                // The audio link shows the phone is now in another car while the old one is still in BLE range.
+                combine(app.drive.state, app.bluetoothStart.state, app.vehicles.vehicles) { drive, bluetooth, profiles ->
+                    drive.vin to VehicleSwitch.switchTarget(drive, bluetooth, profiles)
+                }.distinctUntilChanged().collect { (current, target) ->
+                    if (target != null && !quietStopping) {
+                        app.drive.recordAutomaticStart("다른 차량 탑승 확인 · ${current?.takeLast(6)} 연결 종료 · ${target.takeLast(6)} 검색")
+                        DriveService.stop(this@AutoConnectService)
+                    }
+                }
+            }
             val radio = radioChanges().distinctUntilChanged()
             combine(app.vehicles.vehicles, app.autoConnect.verified, app.autoConnect.enabled, radio) { profiles, verified, enabled, ready ->
                 MonitorTarget(profiles.map { it.vin }.toSet(), verified, enabled, ready.permissions, ready.bluetooth, ready.location,
                     radioRevision = ready.revision)
-            }.combine(app.bluetoothStart.state) { target, bluetooth ->
-                target.copy(triggerAllowed = bluetooth.allowed, triggerName = bluetooth.selectedNames.takeIf { it.isNotEmpty() })
+            }.combine(app.bluetoothStart.state.combine(activeSwitchWatch()) { bluetooth, watch -> bluetooth to watch }) { target, (bluetooth, watch) ->
+                val allowance = VehicleSwitch.allowance(bluetooth, app.vehicles.vehicles.value, watch, System.currentTimeMillis())
+                target.copy(allowance = allowance, triggerName = bluetooth.selectedNames.takeIf { it.isNotEmpty() })
             }.combine(app.drive.state) { target, drive ->
                 target.copy(vehicleActive = drive.active)
             }.distinctUntilChanged().collectLatest { target ->
+                if (quietStopping) return@collectLatest
                 app.autoConnect.proximity.update(target.registered, target.verified)
+                val permitted = app.autoConnect.proximity.scanNames(target.allowance)
                 when {
                     !target.enabled -> stopSelf()
                     !target.permissions -> app.autoConnect.report("자동 연결 권한을 확인해 주세요")
                     !target.bluetooth -> app.autoConnect.report("Bluetooth를 켜면 자동 연결을 다시 시작합니다")
                     !target.location -> app.autoConnect.report("휴대폰 위치 기능을 켜면 자동 연결을 다시 시작합니다")
                     target.vehicleActive -> app.autoConnect.report("차량 연결 중 · 추가 차량 검색 대기")
-                    !target.triggerAllowed -> {
+                    !target.allowance.allowed -> {
                         app.drive.recordAutomaticStart("선택 기기 연결 대기")
                         app.autoConnect.report("${target.triggerName ?: "선택한 블루투스 기기"} 연결 대기 · 연결되면 차량을 검색합니다")
                     }
                     target.registered.isEmpty() -> app.autoConnect.report("자동 연결할 차량을 등록해 주세요")
                     app.autoConnect.proximity.scanNames.isEmpty() -> app.autoConnect.report("먼저 차량에 앱 키를 등록하고 한 번 연결해 주세요")
+                    permitted.isEmpty() -> app.autoConnect.report("${target.triggerName ?: "선택한 블루투스 기기"}의 차량 연결 대기")
                     else -> {
                         while (currentCoroutineContext().isActive) {
-                            try { scan(app.autoConnect.proximity.scanNames) }
+                            try { scan(permitted) }
                             catch (error: CancellationException) { throw error }
                             catch (_: Exception) {
                                 app.autoConnect.report("차량 검색을 다시 준비하고 있습니다")
@@ -142,6 +157,14 @@ class AutoConnectService : Service() {
             }
         }
         return START_STICKY
+    }
+
+    /** The watch while it lasts, then null, so an expired watch stops the scan without another event. */
+    @OptIn(ExperimentalCoroutinesApi::class)
+    private fun activeSwitchWatch() = app.autoConnect.switchWatch.transformLatest { watch ->
+        val remaining = watch?.let { it.untilMillis - System.currentTimeMillis() } ?: 0
+        if (remaining > 0) { emit(watch); delay(remaining) }
+        emit(null)
     }
 
     /** Polling alone misses an off/on cycle between polls: Android has discarded the old scan. */
@@ -195,12 +218,17 @@ class AutoConnectService : Service() {
 
     /** Remove the foreground service rather than hiding a notification while keeping long-running work alive. */
     private fun stopIdleWaiting(): Boolean {
-        if (app.bluetoothStart.state.value.selectedDevices.isEmpty()) {
-            val names = app.autoConnect.proximity.scanNames
-            val bluetoothOn = runCatching { getSystemService(BluetoothManager::class.java)?.adapter?.isEnabled == true }.getOrDefault(false)
-            if (names.isNotEmpty() && bluetoothOn && AutoConnectSettings.ready(this)) {
-                if (runCatching { ProximityScan.arm(this, names) }.isFailure) return false
-                preserveScanOnStop = true // Android owns this PendingIntent scan after the service exits.
+        val bluetooth = app.bluetoothStart.state.value
+        val now = System.currentTimeMillis()
+        val watch = if (bluetooth.selectedDevices.isEmpty()) null else app.autoConnect.beginSwitchWatch(now)
+        val names = app.autoConnect.proximity.scanNames(VehicleSwitch.allowance(bluetooth, app.vehicles.vehicles.value, watch, now))
+        val bluetoothOn = runCatching { getSystemService(BluetoothManager::class.java)?.adapter?.isEnabled == true }.getOrDefault(false)
+        if (names.isNotEmpty() && bluetoothOn && AutoConnectSettings.ready(this)) {
+            if (runCatching { ProximityScan.arm(this, names) }.isFailure) return false
+            preserveScanOnStop = true // Android owns this PendingIntent scan after the service exits.
+            if (watch != null) {
+                ProximityScan.scheduleWatchExpiry(this, watch.untilMillis)
+                app.drive.recordAutomaticStart("차량 전환 대기 · ${watch.leftVin.takeLast(6)} 제외 · 다른 등록 차량 저전력 검색")
             }
         }
         quietStopping = true
@@ -226,7 +254,7 @@ class AutoConnectService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     private data class RadioState(val permissions: Boolean, val bluetooth: Boolean, val location: Boolean, val revision: Int)
-    private data class MonitorTarget(val registered: Set<String>, val verified: Set<String>, val enabled: Boolean, val permissions: Boolean, val bluetooth: Boolean, val location: Boolean, val triggerAllowed: Boolean = true, val triggerName: String? = null, val vehicleActive: Boolean = false, val radioRevision: Int = 0)
+    private data class MonitorTarget(val registered: Set<String>, val verified: Set<String>, val enabled: Boolean, val permissions: Boolean, val bluetooth: Boolean, val location: Boolean, val allowance: ConnectionAllowance = ConnectionAllowance(true), val triggerName: String? = null, val vehicleActive: Boolean = false, val radioRevision: Int = 0)
 
     companion object {
         @Volatile var running = false
@@ -237,14 +265,17 @@ class AutoConnectService : Service() {
         fun start(context: Context) {
             ContextCompat.startForegroundService(context, Intent(context, AutoConnectService::class.java))
         }
+        internal fun allowance(app: TeslaNaviApp) = VehicleSwitch.allowance(app.bluetoothStart.state.value,
+            app.vehicles.vehicles.value, app.autoConnect.switchWatch.value, System.currentTimeMillis())
         /** Called on the main thread for each advertisement that [ProximityScanReceiver] delivers. */
         fun onAdvertisement(context: Context, name: String?, rssi: Int, connectable: Boolean) {
             val app = context.applicationContext as TeslaNaviApp
-            if (!app.autoConnect.enabled.value || !app.bluetoothStart.state.value.allowed) return
+            val allowance = allowance(app)
+            if (!app.autoConnect.enabled.value || !allowance.allowed) return
             // Recheck eligibility because deliveries from an older scan registration may still be queued.
             app.autoConnect.proximity.update(app.vehicles.vehicles.value.map { it.vin }.toSet(), app.autoConnect.verified.value)
             val vin = app.autoConnect.proximity.observe(name, rssi, connectable,
-                SystemClock.elapsedRealtime(), busy = app.drive.state.value.active || DriveService.busy) ?: return
+                SystemClock.elapsedRealtime(), busy = app.drive.state.value.active || DriveService.busy, allowance = allowance) ?: return
             app.vehicles.select(vin)
             app.autoConnect.report("등록 차량을 발견해 연결하고 있습니다")
             app.drive.prepare(vin, automatic = true)

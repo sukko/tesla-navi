@@ -113,6 +113,8 @@ class CameraAlertPolicy {
         return "$distance ${camera.kind.label} 카메라가 있습니다.$limit$variable"
     }
 
+    fun wasAnnounced(cameraId: String) = cameraId in announced
+
     fun commit(announcement: Announcement) {
         announced[announcement.cameraId] = announcement.atMillis
         while (announced.size > 128) announced.remove(announced.keys.first())

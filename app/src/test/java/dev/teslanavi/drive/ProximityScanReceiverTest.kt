@@ -81,6 +81,48 @@ class ProximityScanReceiverTest {
         assertTrue(app.autoConnect.quietWaiting.value)
     }
 
+    private val otherVin = "5YJ3E1EA1MF123456"
+
+    /** The car just driven is [vin]; its audio link has dropped and the watch for another car is open. */
+    private fun leftCarWithOpenWatch() {
+        readyVehicle()
+        app.vehicles.add("Model 3", otherVin)
+        app.autoConnect.verified(otherVin)
+        app.bluetoothStart.select(mapOf("00:11:22:33:44:55" to "Tesla Model Y", "00:11:22:33:44:66" to "Tesla Model 3"))
+        app.autoConnect.driven(vin)
+        assertNotNull(app.autoConnect.beginSwitchWatch(System.currentTimeMillis()))
+    }
+
+    @Test fun watchWakesForTheOtherCarWithoutItsAudioLinkButNotForTheCarJustLeft() {
+        leftCarWithOpenWatch()
+        ProximityScanReceiver().onReceive(app, delivery(VehicleIdentity.localName(vin)))
+        assertNull(shadowOf(app).nextStartedService)
+        ProximityScanReceiver().onReceive(app, delivery(VehicleIdentity.localName(otherVin)))
+        assertEquals(AutoConnectService::class.java.name, shadowOf(app).nextStartedService.component!!.className)
+    }
+
+    @Test fun watchSurvivesProcessDeathAndExpiresWithItsScan() {
+        leftCarWithOpenWatch()
+        val restored = AutoConnectSettings(app).switchWatch.value!!
+        assertEquals(vin, restored.leftVin)
+        shadowOf(adapter).setEnabled(true)
+        ProximityScan.arm(app, setOf(VehicleIdentity.localName(otherVin)))
+        val expired = Intent(app, ProximityScanReceiver::class.java).setAction(ProximityScan.WATCH_EXPIRED)
+        ProximityScanReceiver().onReceive(app, expired)
+        assertEquals("still open: the alarm must not end it early", 1,
+            Shadow.extract<ShadowBluetoothLeScanner>(adapter.bluetoothLeScanner).activeScans.size)
+        app.autoConnect.driven(vin) // Closes the watch: the same allowance an elapsed one gives.
+        ProximityScanReceiver().onReceive(app, expired)
+        assertTrue(Shadow.extract<ShadowBluetoothLeScanner>(adapter.bluetoothLeScanner).activeScans.isEmpty())
+    }
+
+    @Test fun turningAutomationOffEndsTheWatch() {
+        leftCarWithOpenWatch()
+        app.autoConnect.setEnabled(false)
+        assertNull(app.autoConnect.switchWatch.value)
+        assertNull(AutoConnectSettings(app).switchWatch.value)
+    }
+
     @Test fun quietSystemScanWithoutAudioSelectionStillWakesForVerifiedNearbyVehicle() {
         readyVehicle()
         app.autoConnect.quiet(true)

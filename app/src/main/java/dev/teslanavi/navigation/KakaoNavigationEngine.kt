@@ -125,9 +125,9 @@ class KakaoNavigationEngine(private val app: Application, private val settings: 
         val point = (destination as? NavigationDestination.Active)?.point ?: return
         publish(NavigationEvent.Mode(NavigationMode.SAFETY, "차량 목적지까지 카카오 경로를 탐색합니다"))
         try {
-            val gps = awaitGps(token)
+            val startPos = awaitStartPosition(token)
             val goalPos = KNSDK.convertWGS84ToKATEC(point.longitude, point.latitude)
-            val start = KNPOI("현재 위치", gps.pos.x.roundToInt(), gps.pos.y.roundToInt())
+            val start = KNPOI("현재 위치", startPos.first, startPos.second)
             val goal = KNPOI(destination.name ?: "차량 목적지", goalPos.x.roundToInt(), goalPos.y.roundToInt())
             val trip = withTimeout(30000) {
                 usage.routeRequested()
@@ -141,13 +141,13 @@ class KakaoNavigationEngine(private val app: Application, private val settings: 
                     }
                 }
             }
-            withTimeout(30000) {
-                suspendCancellableCoroutine<Unit> { continuation ->
+            val searched = withTimeout(30000) {
+                suspendCancellableCoroutine<KNRoute> { continuation ->
                     trip.routeWithPriority(KNRoutePriority.KNRoutePriority_Recommand, 0) { error, routes ->
                         if (continuation.isActive) {
                             if (error != null) continuation.resumeWithException(sdkError(error))
                             else if (routes.isNullOrEmpty()) continuation.resumeWithException(IllegalStateException("카카오 경로 탐색 결과가 없습니다."))
-                            else continuation.resume(Unit)
+                            else continuation.resume(routes.first())
                         }
                     }
                 }
@@ -161,7 +161,8 @@ class KakaoNavigationEngine(private val app: Application, private val settings: 
             routeInvalid = false
             attach(active, token)
             active.startWithTrip(trip, KNRoutePriority.KNRoutePriority_Recommand, 0)
-            expectedRoute = active.routesOnGuide?.firstOrNull()
+            // Without a phone fix the SDK may not list a route on guide yet; vehicle assistance only needs its geometry.
+            expectedRoute = active.routesOnGuide?.firstOrNull() ?: searched
             publish(NavigationEvent.Mode(NavigationMode.ROUTE, "카카오 경로의 단속카메라를 안내합니다"))
         } catch (error: CancellationException) {
             if (error !is TimeoutCancellationException) throw error
@@ -172,7 +173,8 @@ class KakaoNavigationEngine(private val app: Application, private val settings: 
         }
     }
 
-    private suspend fun awaitGps(token: Long): KNGPSData = withTimeout(30000) {
+    /** KATEC route start: the phone's position, or after a short wait the car's, so poor GPS cannot cancel the route. */
+    private suspend fun awaitStartPosition(token: Long): Pair<Int, Int> = withTimeout(30000) {
         val result = CompletableDeferred<KNGPSData>()
         val receiver = object : KNGPSReceiver {
             override fun didReceiveGpsData(gpsData: KNGPSData) {
@@ -182,7 +184,20 @@ class KakaoNavigationEngine(private val app: Application, private val settings: 
         try {
             KNSDK.requestLocationUpdate(receiver)
             KNSDK.sharedGpsManager()?.recentGpsData?.takeIf { usable(it) }?.let { result.complete(it) }
-            result.await()
+            val startedAt = SystemClock.elapsedRealtime()
+            while (true) {
+                val phone = result.takeIf { it.isCompleted }?.getCompleted()
+                if (phone != null) return@withTimeout phone.pos.x.roundToInt() to phone.pos.y.roundToInt()
+                val now = SystemClock.elapsedRealtime()
+                val car = if (now - startedAt >= ROUTE_START_PHONE_WAIT_MS) vehicleFix.current(now)?.location?.point else null
+                if (car != null) {
+                    onUsage("휴대폰 GPS 수신 불량 · 차량 위치에서 경로 탐색")
+                    val pos = KNSDK.convertWGS84ToKATEC(car.longitude, car.latitude)
+                    return@withTimeout pos.x.roundToInt() to pos.y.roundToInt()
+                }
+                delay(250)
+            }
+            @Suppress("UNREACHABLE_CODE") error("unreachable")
         } finally { KNSDK.removeLocationUpdate(receiver) }
     }
 
@@ -270,11 +285,14 @@ class KakaoNavigationEngine(private val app: Application, private val settings: 
         val gps = guide?.gpsOrigin
         val current = guide?.location
         val fresh = gps != null && usable(gps) && locationAtMillis?.let { SystemClock.elapsedRealtime() - it <= 10000 } == true
+        // 5 s gaps are routine on this phone: switching then alternated sources every minute (0.5.43) while
+        // the car's 5 s poll and BLE timeouts gave no better position. Only a lost phone fix moves to the car.
+        val phoneGood = fresh
         val route = expectedRoute
         if (mode == NavigationMode.ROUTE && !routeInvalid && route != null) {
             prepareAssist(route)
             val helper = assist
-            if (helper != null && fresh && current?.route == route && gps != null && phoneAnchorAt != locationAtMillis) {
+            if (helper != null && phoneGood && current?.route == route && gps != null && phoneAnchorAt != locationAtMillis) {
                 val point = KNSDK.convertKATECToWGS84(gps.pos.x.roundToInt(), gps.pos.y.roundToInt())
                 // Runs inside an SDK callback on the main thread: an invalid conversion skips the anchor, never crashes.
                 val wgs = runCatching { GeoPoint(point.y, point.x) }.getOrNull()
@@ -285,7 +303,7 @@ class KakaoNavigationEngine(private val app: Application, private val settings: 
                     phoneAnchorAt = locationAtMillis
                 }
             }
-            if (!fresh && helper != null) {
+            if (!phoneGood && helper != null) {
                 val now = SystemClock.elapsedRealtime()
                 val fix = vehicleFix.current(now)
                 val matched = fix?.let { helper.locate(it, now) }
@@ -397,6 +415,8 @@ class KakaoNavigationEngine(private val app: Application, private val settings: 
     private fun sdkError(error: KNError) = KakaoSdkException(error.code)
 
     companion object {
+        /** A route search waits this long for the phone before starting from the car's position. */
+        private const val ROUTE_START_PHONE_WAIT_MS = 5000L
         internal fun roadClass(type: KNRoadType?): RoadClass = when (type) {
             KNRoadType.KNRoadType_Highway -> RoadClass.HIGHWAY
             KNRoadType.KNRoadType_GeneralRoad, KNRoadType.KNRoadType_NarrowRoad,

@@ -20,12 +20,43 @@ class AutoConnectSettings(context: Context) {
     val status = _status.asStateFlow()
     private val _verified = MutableStateFlow(prefs.getStringSet("verified-vins", emptySet())!!.toSet())
     val verified = _verified.asStateFlow()
+    private var drivenVin = prefs.getString("driven-vin", null)
+    private val _switchWatch = MutableStateFlow(prefs.getString("switch-left-vin", null)?.let {
+        VehicleSwitchWatch(it, prefs.getLong("switch-until", 0))
+    })
+    /** Persisted: Android routinely kills the process within a minute of the idle stop. */
+    val switchWatch = _switchWatch.asStateFlow()
+
+    /** A real trip proves which car the phone was in and ends any watch that led to it. */
+    fun driven(vin: String) {
+        if (drivenVin == vin && _switchWatch.value == null) return
+        drivenVin = vin
+        _switchWatch.value = null
+        prefs.edit().putString("driven-vin", vin).remove("switch-left-vin").remove("switch-until").apply()
+    }
+
+    /** Only a car actually driven opens a watch, so walking past parked cars cannot alternate between them. */
+    fun beginSwitchWatch(now: Long): VehicleSwitchWatch? {
+        drivenVin?.let { vin ->
+            val watch = VehicleSwitchWatch(vin, now + VehicleSwitch.WATCH_MILLIS)
+            drivenVin = null
+            _switchWatch.value = watch
+            prefs.edit().remove("driven-vin").putString("switch-left-vin", vin).putLong("switch-until", watch.untilMillis).apply()
+        }
+        return _switchWatch.value?.takeIf { now < it.untilMillis }
+    }
+
+    private fun clearSwitchState() {
+        drivenVin = null
+        _switchWatch.value = null
+        prefs.edit().remove("driven-vin").remove("switch-left-vin").remove("switch-until").apply()
+    }
 
     fun setEnabled(value: Boolean) {
         check(prefs.edit().putBoolean("enabled", value).commit())
         _enabled.value = value
         quiet(false)
-        if (!value) proximity.reset()
+        if (!value) { proximity.reset(); clearSwitchState() }
         if (!value) _status.value = "자동 연결 꺼짐"
     }
 

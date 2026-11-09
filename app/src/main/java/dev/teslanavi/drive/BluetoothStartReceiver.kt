@@ -50,7 +50,7 @@ class BluetoothStartReceiver : BroadcastReceiver() {
             app.bluetoothStart.refresh()
             if (device.address !in app.bluetoothStart.state.value.selectedDevices) return
             fun record(message: String) = app.drive.recordAutomaticStart(message)
-            record("선택 기기 ${if (connected) "연결" else "해제"} 수신 · ${if (profile == null) "ACL" else "프로필 $profile"} · 자동 연결 ${app.autoConnect.enabled.value}")
+            record("선택 기기 ${if (connected) "연결" else "해제"} 수신 · ${app.bluetoothStart.state.value.selectedDevices[device.address]} · ${if (profile == null) "ACL" else "프로필 $profile"} · 자동 연결 ${app.autoConnect.enabled.value}")
             if (!connected || !app.autoConnect.enabled.value) return
             if (!AutoConnectSettings.ready(context)) {
                 record("권한 부족으로 자동 시작 보류")

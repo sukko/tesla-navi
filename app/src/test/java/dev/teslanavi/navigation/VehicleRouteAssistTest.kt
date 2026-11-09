@@ -35,6 +35,29 @@ class VehicleRouteAssistTest {
         assertNull(assist.locate(fix(60.0, 0.0, 31_000), 31_000))
     }
 
+    @Test fun poorPhoneGpsFromTheStartStillGuidesFromAUniqueVehicleMatchWithHeading() {
+        val geometry = RouteGeometry(listOf(point(0.0, 0.0), point(1000.0, 0.0)))
+        val assist = VehicleRouteAssist(geometry, listOf(RouteCamera(camera, 800.0)))
+        assertNull("the opposite direction must not start guidance", assist.locate(fix(300.0, 0.0, heading = 270), 0))
+        val match = assist.locate(fix(300.0, 0.0, heading = 90), 0)!!
+        assertEquals(300.0, match.meters, 0.1)
+        assertEquals(500, assist.camerasAhead(match.meters).single().distanceMeters)
+    }
+
+    @Test fun vehicleMatchResumesAfterALongLossAndLaterFollowsProgress() {
+        val geometry = RouteGeometry(listOf(point(0.0, 0.0), point(5000.0, 0.0)))
+        val assist = VehicleRouteAssist(geometry, emptyList())
+        assist.anchor(point(50.0, 0.0), 50.0, 0)
+        assertEquals(2000.0, assist.locate(fix(2000.0, 0.0, 60_000, heading = 90), 60_000)!!.meters, 0.1)
+        assertEquals(2050.0, assist.locate(fix(2050.0, 0.0, 65_000, heading = 90), 65_000)!!.meters, 0.1)
+        assertNull("once following, a jump is rejected even with a heading", assist.locate(fix(4000.0, 0.0, 70_000, heading = 90), 70_000))
+    }
+
+    @Test fun routeDrivenTwiceInOneDirectionCannotStartFromTheVehicleAlone() {
+        val loop = RouteGeometry(listOf(point(0.0, 0.0), point(500.0, 0.0), point(500.0, 200.0), point(0.0, 200.0), point(0.0, 0.0), point(500.0, 0.0)))
+        assertNull(VehicleRouteAssist(loop, emptyList()).locate(fix(250.0, 0.0, heading = 90), 0))
+    }
+
     @Test fun ambiguousParallelRoadsAndCrossingsAreRejected() {
         val geometry = RouteGeometry(listOf(point(0.0, 0.0), point(500.0, 0.0), point(500.0, 10.0), point(0.0, 10.0)))
         assertNull(geometry.match(point(200.0, 5.0)))

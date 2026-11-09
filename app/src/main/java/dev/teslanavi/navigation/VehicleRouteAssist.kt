@@ -103,7 +103,7 @@ internal class RouteGeometry(points: List<GeoPoint>) {
 
 internal data class RouteCamera(val reading: CameraReading, val meters: Double)
 
-/** Needs a confirmed phone/route anchor first; cannot invent a route when both sources are absent. */
+/** Follows a phone anchor when one exists. Without one, a unique match with the car's heading starts or restores progress. */
 internal class VehicleRouteAssist(val geometry: RouteGeometry, val cameras: List<RouteCamera>) {
     private var progress: RouteGeometry.Match? = null
     private var progressAt: Long? = null
@@ -116,12 +116,17 @@ internal class VehicleRouteAssist(val geometry: RouteGeometry, val cameras: List
     }
 
     fun locate(fix: VehicleGuidanceFix, now: Long): RouteGeometry.Match? {
-        val previous = progress ?: return null
-        val elapsed = progressAt?.let { now - it }?.takeIf { it in 0..30_000 } ?: return null
-        if (lastFixAt == fix.receivedAtMillis) return previous
-        val match = geometry.match(fix.location.point ?: return null,
-            (previous.meters - 20).coerceAtLeast(0.0)..
+        val point = fix.location.point ?: return null
+        val previous = progress
+        val elapsed = progressAt?.let { now - it }?.takeIf { it in 0..30_000 }
+        val match = if (previous == null || elapsed == null) {
+            // Phone GPS was bad from the start or for too long. Without a heading a whole-route match could be the wrong direction.
+            geometry.match(point, heading = fix.location.headingDegrees ?: return null) ?: return null
+        } else {
+            if (lastFixAt == fix.receivedAtMillis) return previous
+            geometry.match(point, (previous.meters - 20).coerceAtLeast(0.0)..
                 (previous.meters + 40 + elapsed * 0.065).coerceAtMost(geometry.totalMeters), fix.location.headingDegrees) ?: return null
+        }
         progress = match; progressAt = fix.receivedAtMillis; lastFixAt = fix.receivedAtMillis
         return match
     }

@@ -1,6 +1,7 @@
 package dev.teslanavi.drive
 
 import android.annotation.SuppressLint
+import android.app.AlarmManager
 import android.app.PendingIntent
 import android.bluetooth.BluetoothManager
 import android.bluetooth.le.ScanFilter
@@ -19,6 +20,7 @@ import kotlinx.coroutines.flow.MutableSharedFlow
 @SuppressLint("MissingPermission")
 internal object ProximityScan {
     const val ACTION = "dev.teslanavi.VEHICLE_ADVERTISEMENT"
+    const val WATCH_EXPIRED = "dev.teslanavi.SWITCH_WATCH_EXPIRED"
     private const val REQUEST = 20
 
     /** Scan errors that Android reports through the PendingIntent after registration succeeded. */
@@ -35,6 +37,13 @@ internal object ProximityScan {
     }
 
     fun disarm(context: Context) { runCatching { scanner(context)?.stopScan(intent(context)) } }
+
+    /** A filtered scan with no match never delivers, so only an alarm can end a vehicle switch watch. */
+    fun scheduleWatchExpiry(context: Context, atMillis: Long) {
+        context.getSystemService(AlarmManager::class.java).setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, atMillis,
+            PendingIntent.getBroadcast(context, REQUEST + 1, Intent(context, ProximityScanReceiver::class.java).setAction(WATCH_EXPIRED),
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE))
+    }
 
     private fun scanner(context: Context) =
         context.getSystemService(BluetoothManager::class.java)?.adapter?.bluetoothLeScanner

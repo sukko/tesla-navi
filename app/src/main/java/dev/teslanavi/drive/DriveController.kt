@@ -59,7 +59,7 @@ class DriveController(private val context: Context, private val keyStore: Vehicl
 
     fun prepare(vin: String, automatic: Boolean = false) {
         _state.value = DriveState(vin, DrivePhase.CONNECTING, "연결 준비 중", automatic = automatic,
-            events = write(attempts.begin(automatic, if (automatic) "자동 연결 준비" else "수동 연결 준비")))
+            events = write(attempts.begin(automatic, "${vin.takeLast(6)} · ${if (automatic) "자동 연결 준비" else "수동 연결 준비"}")))
     }
     fun clear() { attempts.cancelled(); _state.value = DriveState(events = history.read()) }
     fun requestRefresh() { refresh.trySend(Unit) }
@@ -175,6 +175,7 @@ class DriveController(private val context: Context, private val keyStore: Vehicl
                         is NavigationDestination.Active -> "차량 목적지를 확인했습니다"
                     })
                     failures = 0
+                    if (snapshot.speedKph?.let { it.isFinite() && it >= TripMotionGate.START_KPH } == true) app.autoConnect.driven(profile.vin)
                     if (app.features.logbook.value) recordTrip(profile.vin, snapshot, batteryPoll, polledAt)
                     if (batteryPoll.due(polledAt)) readBattery(client, profile.vin, batteryPoll, snapshot.odometerKm)
                     // Battery reads fit inside this wait. Manual refresh can still wake it immediately.

@@ -41,6 +41,48 @@ class GeminiVoiceTest {
         assertNull(render(missing, "300미터 앞"))
     }
 
+    private fun awaitFallback(voice: GeminiVoice): Pcm? {
+        repeat(250) { voice.fallback()?.let { return it }; Thread.sleep(20) }
+        return null
+    }
+
+    @Test fun storedPhraseIsMadeOnceAndSurvivesTheLossOfThePhraseCache() {
+        val calls = mutableListOf<String>()
+        val cache = temp.newFolder()
+        val saved = temp.newFolder()
+        val voice = GeminiVoice({ "key" }, cache, { _, text, _, _ -> synchronized(calls) { calls += text }; pcm }, fallbackDir = saved)
+        assertNull(voice.fallback())
+        voice.prepareFallback()
+        assertNotNull(awaitFallback(voice))
+        assertEquals(listOf(STORED_CAMERA_PHRASE), synchronized(calls) { calls.toList() })
+        cache.deleteRecursively()
+        val restarted = GeminiVoice({ "key" }, cache, { _, _, _, _ -> error("the saved phrase must not be requested again") }, fallbackDir = saved)
+        restarted.prepareFallback()
+        assertNotNull("works with Gemini failing", restarted.fallback())
+    }
+
+    @Test fun anotherVoiceRecordingIsUsedWhenTheCurrentVoiceHasNone() {
+        val saved = temp.newFolder()
+        val first = GeminiVoice({ "key" }, temp.newFolder(), { _, _, _, _ -> pcm }, speaker = { GeminiSpeaker.Kore }, fallbackDir = saved)
+        first.prepareFallback()
+        assertNotNull(awaitFallback(first))
+        val other = GeminiVoice({ "" }, temp.newFolder(), speaker = { GeminiSpeaker.Zephyr }, fallbackDir = saved)
+        other.prepareFallback()
+        assertNotNull(other.fallback())
+    }
+
+    @Test fun unreachableServiceLeavesNoStoredPhraseAndCanRetry() {
+        var fail = true
+        val voice = GeminiVoice({ "key" }, temp.newFolder(), { _, _, _, _ -> if (fail) throw java.io.IOException("offline") else pcm }, clock = { 0L }, fallbackDir = temp.newFolder())
+        voice.prepareFallback()
+        Thread.sleep(200)
+        assertNull(voice.fallback())
+        fail = false
+        voice.reset() // Clears the failure backoff, as the next retry window would.
+        voice.prepareFallback()
+        assertNotNull(awaitFallback(voice))
+    }
+
     @Test fun changingVoiceNeverReusesAnotherVoiceAudioAndReturningReusesItsCache() {
         val calls = mutableListOf<GeminiSpeaker>()
         var selected = GeminiSpeaker.Kore

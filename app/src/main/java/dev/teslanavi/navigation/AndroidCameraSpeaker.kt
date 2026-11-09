@@ -82,11 +82,15 @@ class AndroidCameraSpeaker(private val context: Context,
         .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH).build()
 
     override suspend fun initialize(): String? {
-        val systemError = initializeSystemVoice()
-        val voice = selectedVoice() ?: return systemError
-        val error = voice.load()
-        if (error != null) { record("cloud init failed; system fallback"); return systemError }
+        val voice = selectedVoice() ?: return initializeSystemVoice()
+        // Cloud failures play the stored phrase, so the phone's TTS engine is not needed here.
+        stopSpeech()
+        tts?.shutdown()
+        tts = null
+        if (voice.load() != null) record("cloud init failed; stored phrase only")
+        voice.prepareFallback()
         needsInitialization = false
+        retryAfter = 0
         return null
     }
 
@@ -180,7 +184,7 @@ class AndroidCameraSpeaker(private val context: Context,
     override fun speak(text: String): Boolean = speak(text) {}
 
     override fun speak(text: String, onComplete: (Boolean) -> Unit): Boolean {
-        val voice = readyCloudVoice()
+        val voice = selectedVoice()
         if (voice == null && tts == null) return false
         if (needsInitialization || utterance != null || gain == 0f || SystemClock.elapsedRealtime() < retryAfter) return false
         track?.pause()
@@ -195,12 +199,20 @@ class AndroidCameraSpeaker(private val context: Context,
         record("speech requested id=$id kind=${if (text == "주행시작") "trip" else "guidance"} voice=${if (voice == null) "system" else preferred().name.lowercase()} gain=$gain musicVolume=${audio.getStreamVolume(AudioManager.STREAM_MUSIC)}")
         handler.postDelayed(speechTimeout, synthesisTimeoutMillis)
         if (voice != null) {
-            voice.render(KoreanSpeechText.normalize(text)) { pcm -> handler.post {
-                if (id != utterance) return@post
-                if (pcm != null && play(pcm, id)) return@post
-                record("cloud render failed; system fallback id=$id")
-                speakSystem(text, id)
-            } }
+            val camera = isCameraPresenceSpeech(text)
+            voice.render(KoreanSpeechText.normalize(text)) { pcm ->
+                val stored = if (pcm == null && camera) voice.fallback() else null
+                handler.post {
+                    if (id != utterance) return@post
+                    if (pcm != null && play(pcm, id)) return@post
+                    record("cloud render failed id=$id camera=$camera stored=${stored != null}")
+                    // A trip start or speed warning has no stored words; the overspeed chime covers the latter.
+                    if (!camera) { finishCurrent(false); return@post }
+                    if (stored != null && play(stored, id, "stored")) return@post
+                    // Nothing saved yet: the chime still warns of the camera without the phone's voice.
+                    if (!play(Pcm(WarningChime.pcm, WarningChime.SAMPLE_RATE), id, "chime")) finishCurrent(false)
+                }
+            }
             return true
         }
         return speakSystem(text, id)
@@ -228,7 +240,11 @@ class AndroidCameraSpeaker(private val context: Context,
         GuidanceVoice.GEMINI -> cloud
     }
     private fun readyCloudVoice() = selectedVoice()?.takeIf { it.ready }
-    override fun prefetch(text: String) { readyCloudVoice()?.prefetch(KoreanSpeechText.normalize(text)) }
+    override fun prefetch(text: String) {
+        val voice = readyCloudVoice() ?: return
+        voice.prepareFallback() // Retries a phrase that could not be saved at startup.
+        voice.prefetch(KoreanSpeechText.normalize(text))
+    }
 
     /** Static PCM playback. The marker ends the utterance; a timer covers devices that drop the marker callback. */
     private fun play(pcm: Pcm, id: String, source: String = "gemini"): Boolean = runCatching {
@@ -240,7 +256,7 @@ class AndroidCameraSpeaker(private val context: Context,
         voiceTrack = output
         check(output.write(pcm.bytes, 0, pcm.bytes.size) == pcm.bytes.size) { "음성 PCM 데이터 전송 실패" }
         output.setVolume(gain)
-        val requestedSpeed = if (source == "gemini") playbackSpeed().takeIf { it.isFinite() }?.coerceIn(.8f, 1.5f) ?: 1f else 1f
+        val requestedSpeed = if (source == "gemini" || source == "stored") playbackSpeed().takeIf { it.isFinite() }?.coerceIn(.8f, 1.5f) ?: 1f else 1f
         val speed = runCatching {
             output.playbackParams = PlaybackParams().allowDefaults().setSpeed(requestedSpeed).setPitch(1f)
             requestedSpeed

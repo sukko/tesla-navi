@@ -71,6 +71,63 @@ class AutoConnectServiceTest {
         } finally { if (!destroyed) controller.destroy(); runCurrent(); Dispatchers.resetMain() }
     }
 
+    /** Today's real sequence: out of the Model Y, its audio link drops, and the Model 3's audio link never connects. */
+    @OptIn(ExperimentalCoroutinesApi::class)
+    @Test fun leavingADrivenCarKeepsAScanForTheOtherCarAfterTheServiceExits() = runTest {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        val controller = Robolectric.buildService(AutoConnectService::class.java).create()
+        var destroyed = false
+        try {
+            shadowOf(app).grantPermissions(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION,
+                Manifest.permission.ACCESS_BACKGROUND_LOCATION, Manifest.permission.BLUETOOTH_SCAN,
+                Manifest.permission.BLUETOOTH_CONNECT, Manifest.permission.POST_NOTIFICATIONS)
+            val adapter = app.getSystemService(BluetoothManager::class.java).adapter
+            shadowOf(adapter).setState(BluetoothAdapter.STATE_ON)
+            shadowOf(app.getSystemService(LocationManager::class.java)).setLocationEnabled(true)
+            val left = "5YJYGDEE1NF123456"
+            val other = "5YJ3E1EA1MF123456"
+            app.vehicles.add("Model Y", left); app.vehicles.add("Model 3", other)
+            app.autoConnect.verified(left); app.autoConnect.verified(other); app.autoConnect.setEnabled(true)
+            app.bluetoothStart.select(mapOf("00:11:22:33:44:55" to "Tesla Model Y", "00:11:22:33:44:66" to "Tesla Model 3"))
+            app.autoConnect.driven(left)
+            controller.get().onStartCommand(null, 0, 1); runCurrent()
+            advanceTimeBy(120_001); runCurrent()
+            assertFalse(AutoConnectService.running)
+            assertEquals(left, AutoConnectSettings(app).switchWatch.value?.leftVin)
+            controller.destroy(); destroyed = true; runCurrent()
+            val scanner = Shadow.extract<ShadowBluetoothLeScanner>(adapter.bluetoothLeScanner)
+            assertEquals("the system scan must survive service destruction", 1, scanner.activeScans.size)
+            assertEquals(listOf(VehicleIdentity.localName(other)), scanner.activeScans.single().scanFilters()!!.map { it.deviceName })
+        } finally { if (!destroyed) controller.destroy(); runCurrent(); Dispatchers.resetMain() }
+    }
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    @Test fun audioLinkOfAnotherCarEndsTheAutomaticSessionOnTheOldCar() = runTest {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        val controller = Robolectric.buildService(AutoConnectService::class.java).create()
+        try {
+            shadowOf(app).grantPermissions(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION,
+                Manifest.permission.ACCESS_BACKGROUND_LOCATION, Manifest.permission.BLUETOOTH_SCAN,
+                Manifest.permission.BLUETOOTH_CONNECT, Manifest.permission.POST_NOTIFICATIONS)
+            val adapter = app.getSystemService(BluetoothManager::class.java).adapter
+            shadowOf(adapter).setState(BluetoothAdapter.STATE_ON)
+            shadowOf(app.getSystemService(LocationManager::class.java)).setLocationEnabled(true)
+            val old = "5YJYGDEE1NF123456"
+            val next = "5YJ3E1EA1MF123456"
+            val nextAudio = "00:11:22:33:44:66"
+            app.vehicles.add("Model Y", old); app.vehicles.add("Model 3", next)
+            app.autoConnect.verified(old); app.autoConnect.verified(next); app.autoConnect.setEnabled(true)
+            shadowOf(adapter).setBondedDevices(setOf(adapter.getRemoteDevice(nextAudio)))
+            app.bluetoothStart.select(mapOf(nextAudio to "Tesla Model 3"))
+            app.bluetoothStart.refresh()
+            app.drive.prepare(old, automatic = true)
+            controller.get().onStartCommand(null, 0, 1); runCurrent()
+            while (shadowOf(app).nextStartedService != null) Unit
+            app.bluetoothStart.connectionChanged(nextAudio, true); runCurrent()
+            assertEquals("dev.teslanavi.STOP", shadowOf(app).nextStartedService?.action)
+        } finally { controller.destroy(); runCurrent(); Dispatchers.resetMain() }
+    }
+
     @OptIn(ExperimentalCoroutinesApi::class)
     @Test fun activeVehicleStopsExtraScanningAndEndingSessionResumesWaitingScan() = runTest {
         Dispatchers.setMain(StandardTestDispatcher(testScheduler))
